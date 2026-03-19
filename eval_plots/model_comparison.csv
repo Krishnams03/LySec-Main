@@ -1,0 +1,4 @@
+metric,baseline,faces_v1
+incident_count,5,5
+avg_score,21.0,95.61
+avg_monitor_diversity,3.8,3.8

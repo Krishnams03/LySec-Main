@@ -21,11 +21,14 @@ setup(
         "python-daemon>=2.3.0",
         "pyyaml>=6.0",
         "rich>=13.0.0",
+        "matplotlib>=3.7.0",
     ],
     entry_points={
         "console_scripts": [
             "dftool=dftool.cli:main",
             "dftoold=dftool.daemon:main",
+            "dftool-eval=dftool.evaluate:main",
+            "dftool-eval-plot=dftool.plot_eval:main",
         ],
     },
     classifiers=[

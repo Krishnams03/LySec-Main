@@ -4,3 +4,4 @@ watchdog>=3.0.0
 python-daemon>=2.3.0
 pyyaml>=6.0
 rich>=13.0.0
+matplotlib>=3.7.0

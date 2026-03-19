@@ -98,6 +98,50 @@ DEFAULT_CONFIG = {
         "alert_log": DEFAULT_ALERT_LOG,
         "console": True,
         "syslog": True,
+        "correlation": {
+            "enabled": True,
+            "model_name": "FACES-v1",
+            "window_sec": 300,
+            "min_unique_monitors": 2,
+            "min_score": 45,
+            "emit_suppress_sec": 180,
+            "score_weights": {
+                "severity": 4.0,
+                "diversity": 7.0,
+                "burst": 20.0,
+                "rarity": 25.0,
+                "chain": 1.0,
+            },
+            "chain_patterns": [
+                {
+                    "name": "credential_to_execution",
+                    "events": [
+                        "LOGIN_FAILED",
+                        "BRUTE_FORCE_DETECTED",
+                        "SUSPICIOUS_PROCESS",
+                    ],
+                    "bonus": 14,
+                },
+                {
+                    "name": "lateral_to_privilege",
+                    "events": [
+                        "LOGIN_SUCCESS",
+                        "UID_CHANGE",
+                        "PRIVILEGE_ESCALATION",
+                    ],
+                    "bonus": 16,
+                },
+                {
+                    "name": "network_recon_chain",
+                    "events": [
+                        "NEW_INTERFACE",
+                        "PROMISCUOUS_MODE",
+                        "NEW_LISTENER",
+                    ],
+                    "bonus": 12,
+                },
+            ],
+        },
         "email": {
             "enabled": False,
             "smtp_server": "",

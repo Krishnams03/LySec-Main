@@ -23,7 +23,7 @@ evidence trail is more valuable than inline prevention for forensic investigatio
 │        │              │              │               │           │
 │  ┌─────┴──────────────┴──────────────┴───────────────┴───────┐  │
 │  │                    Alert Engine                             │  │
-│  │          (deduplicate, dispatch, fan-out)                   │  │
+│  │  (deduplicate, correlate, score incidents, dispatch, fan-out)│  │
 │  └─────┬──────────┬──────────┬──────────┬────────────────────┘  │
 │        │          │          │          │                        │
 │  ┌─────┴──┐ ┌────┴───┐ ┌───┴────┐ ┌───┴─────┐                  │
@@ -54,6 +54,27 @@ evidence trail is more valuable than inline prevention for forensic investigatio
 | **Network**  | Listening sockets, interfaces, promiscuous mode      | New listener, rogue NIC, sniffing detected        |
 | **Process**  | Process table via psutil                              | Suspicious tools (nmap, nc…), privilege escalation|
 | **Filesystem**| Critical paths via inotify (watchdog)               | /etc/passwd, shadow, sudoers, cron, SSH keys      |
+
+## Stronger Novel Capability: Cross-Monitor Incident Correlation
+
+DFTool now includes a correlation layer that promotes isolated alerts into a
+single high-confidence incident when multiple monitors report related activity
+within a time window.
+
+- Correlates by shared forensic indicators (`ip`, `user`, `pid`, `interface`, `path`, `serial`, `host`, `listener`)
+- Uses a named composite score model (`FACES-v1`) across contributing events
+- Emits a `CORRELATED_INCIDENT` alert with linked contributing alert IDs
+- Suppresses duplicate incident emissions for the same campaign key
+
+`FACES-v1` combines five components:
+- Severity evidence from contributing alert severities
+- Monitor diversity bonus (more independent monitors = stronger confidence)
+- Burst bonus (tighter event clustering in time = stronger confidence)
+- Indicator rarity bonus (rarer indicator in window = stronger confidence)
+- Attack-chain bonus from ordered event patterns (e.g., login abuse → suspicious execution)
+
+This makes the output stronger for investigations because analysts get
+campaign-level evidence, not only individual point alerts.
 
 ## Why Detection-Only (Not Prevention)?
 
@@ -119,7 +140,49 @@ sudo dftool export --format csv --output /tmp/timeline.csv
 
 # Verify log integrity (SHA-256 manifests)
 sudo dftool verify
+
+# Evaluate correlation models on replayed alerts
+sudo dftool-eval --alerts-file /var/log/dftool/alerts.log --top 10
 ```
+
+## Correlation Evaluation
+
+Use the evaluator to benchmark baseline correlation (severity sum) versus
+`FACES-v1` on historical JSONL alerts.
+
+```bash
+sudo dftool-eval \
+  --alerts-file /var/log/dftool/alerts.log \
+  --window-sec 300 \
+  --baseline-min-score 8 \
+  --faces-min-score 45 \
+  --output-json /tmp/dftool_eval.json \
+  --output-csv /tmp/dftool_eval_incidents.csv \
+  --top 10
+```
+
+The report includes incident counts, overlap, average score/event richness,
+top-scoring FACES incidents, and matched chain-pattern frequencies.
+Use export flags to produce paper-ready artifacts:
+- `--output-json` writes full summary + both model incident sets.
+- `--output-csv` writes incident-level rows for tables/plots.
+
+Generate publication-ready plots from evaluator outputs:
+
+```bash
+sudo dftool-eval-plot \
+  --input-json /tmp/dftool_eval.json \
+  --output-dir /tmp/dftool_eval_plots
+```
+
+Plot artifacts generated:
+- `threshold_sweep.png` (incident count vs score threshold)
+- `score_distribution.png` (baseline vs FACES score histogram)
+- `model_comparison.png` (incident count, avg score, avg monitor diversity)
+- `chain_pattern_frequency.png` (FACES matched chain-pattern frequency)
+- `threshold_sweep.csv` (table backing the threshold sweep figure)
+- `model_comparison.csv` (table backing the model comparison figure)
+- `chain_pattern_frequency.csv` (table backing chain frequency figure)
 
 ## Configuration
 
@@ -152,6 +215,18 @@ monitors:
 
 alerts:
   syslog: true
+  correlation:
+    enabled: true
+    model_name: FACES-v1
+    window_sec: 300
+    min_unique_monitors: 2
+    min_score: 45
+    score_weights:
+      severity: 4.0
+      diversity: 7.0
+      burst: 20.0
+      rarity: 25.0
+      chain: 1.0
   email:
     enabled: true
     smtp_server: smtp.example.com

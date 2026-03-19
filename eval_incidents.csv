@@ -1,0 +1,11 @@
+model,epoch,indicator,campaign_key,score,event_count,monitor_count,monitors,trigger_event,matched_chains,components
+baseline,1773914420.0,pid:4321,pid:4321|process|usb,10.0,2,2,process;usb,SUSPICIOUS_PROCESS,,"{""severity_sum"": 10.0}"
+baseline,1773914435.0,path:/etc/sudoers,path:/etc/sudoers|filesystem|process|usb,13.0,3,3,filesystem;process;usb,FS_FILE_MODIFIED,,"{""severity_sum"": 13.0}"
+baseline,1773914460.0,ip:10.0.0.5,ip:10.0.0.5|filesystem|login|process|usb,16.0,4,4,filesystem;login;process;usb,LOGIN_FAILED,,"{""severity_sum"": 16.0}"
+baseline,1773914505.0,listener:0.0.0.0:4444,listener:0.0.0.0:4444|filesystem|login|network|process|usb,29.0,6,5,filesystem;login;network;process;usb,NEW_LISTENER,,"{""severity_sum"": 29.0}"
+baseline,1773914520.0,pid:4321,pid:4321|filesystem|login|network|process|usb,37.0,7,5,filesystem;login;network;process;usb,UID_CHANGE,,"{""severity_sum"": 37.0}"
+faces,1773914420.0,pid:4321,pid:4321|process|usb,78.22,2,2,process;usb,SUSPICIOUS_PROCESS,,"{""burst"": 6.22, ""chain"": 0.0, ""diversity"": 7.0, ""rarity"": 25.0, ""severity"": 40.0}"
+faces,1773914435.0,path:/etc/sudoers,path:/etc/sudoers|filesystem|process|usb,99.83,3,3,filesystem;process;usb,FS_FILE_MODIFIED,,"{""burst"": 8.83, ""chain"": 0.0, ""diversity"": 14.0, ""rarity"": 25.0, ""severity"": 52.0}"
+faces,1773914460.0,ip:10.0.0.5,ip:10.0.0.5|filesystem|login|process|usb,100.0,4,4,filesystem;login;process;usb,LOGIN_FAILED,,"{""burst"": 10.67, ""chain"": 0.0, ""diversity"": 21.0, ""rarity"": 25.0, ""severity"": 64.0}"
+faces,1773914505.0,listener:0.0.0.0:4444,listener:0.0.0.0:4444|filesystem|login|network|process|usb,100.0,6,5,filesystem;login;network;process;usb,NEW_LISTENER,,"{""burst"": 13.0, ""chain"": 0.0, ""diversity"": 28.0, ""rarity"": 25.0, ""severity"": 100.0}"
+faces,1773914520.0,pid:4321,pid:4321|filesystem|login|network|process|usb,100.0,7,5,filesystem;login;network;process;usb,UID_CHANGE,,"{""burst"": 12.0, ""chain"": 0.0, ""diversity"": 28.0, ""rarity"": 8.33, ""severity"": 100.0}"
