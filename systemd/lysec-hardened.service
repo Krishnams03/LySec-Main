@@ -1,0 +1,42 @@
+[Unit]
+Description=LySec - Linux Forensics Monitoring Daemon (Hardened)
+Documentation=https://github.com/yourname/lysec
+After=network.target syslog.target
+Wants=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=forking
+PIDFile=/var/run/lysec/lysecd.pid
+ExecStart=/usr/local/bin/lysecd start
+ExecStop=/usr/local/bin/lysecd stop
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lysec
+
+# Security controls
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/lysec /var/lib/lysec /var/run/lysec
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+# Keep service manageable by administrators. For stricter posture,
+# consider adding RefuseManualStop=yes after validating operations.
+
+[Install]
+WantedBy=multi-user.target

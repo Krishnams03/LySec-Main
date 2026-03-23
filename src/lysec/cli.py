@@ -6,6 +6,9 @@ generating timeline reports, and managing the daemon.
 Usage:
     lysec status                                # daemon status
     lysec alerts [--severity HIGH] [--last 1h]  # view alerts
+    lysec anomalies [--last 1h] [--top 20]      # ranked ML anomaly incidents
+    lysec split [--last 1h] [--output-dir /tmp/lysec_split]  # per-monitor split
+    lysec correlate --scenario usb_login_modify --last 6h     # attack chain search
     lysec timeline [--from ... --to ...]        # event timeline
     lysec search --query "ssh root"             # search logs
     lysec export --format csv --output out.csv  # export evidence
@@ -225,6 +228,217 @@ def cmd_timeline(args, config):
             )
 
 
+def cmd_anomalies(args, config):
+    """Display ranked live ML anomaly incidents."""
+    alert_log = config.get("alerts", {}).get(
+        "alert_log", "/var/log/lysec/alerts.log"
+    )
+    entries = read_log_entries(alert_log)
+
+    entries = [
+        e
+        for e in entries
+        if e.get("event_type") == "ML_ANOMALY_INCIDENT" or e.get("monitor") == "ml"
+    ]
+
+    if args.last:
+        try:
+            delta = parse_duration(args.last)
+            cutoff = datetime.now(timezone.utc) - delta
+            filtered = []
+            for e in entries:
+                ts_str = e.get("timestamp", "")
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts >= cutoff:
+                        filtered.append(e)
+                except Exception:
+                    filtered.append(e)
+            entries = filtered
+        except ValueError as exc:
+            _print_error(str(exc))
+            return
+
+    if args.min_score is not None:
+        try:
+            threshold = float(args.min_score)
+            entries = [
+                e
+                for e in entries
+                if float((e.get("details", {}) or {}).get("anomaly_score", 0.0)) >= threshold
+            ]
+        except (TypeError, ValueError):
+            _print_error("Invalid --min-score value")
+            return
+
+    entries.sort(
+        key=lambda e: (
+            float((e.get("details", {}) or {}).get("anomaly_score", 0.0)),
+            e.get("timestamp", ""),
+        ),
+        reverse=True,
+    )
+
+    top_n = max(1, int(args.top or 20))
+    entries = entries[:top_n]
+
+    if not entries:
+        _print_info("No ML anomaly incidents found for the specified criteria.")
+        return
+
+    if HAS_RICH:
+        table = Table(title="LySec ML Anomaly Triage", box=box.ROUNDED, show_lines=True)
+        table.add_column("Time", style="cyan", width=26)
+        table.add_column("Severity", width=10)
+        table.add_column("Anomaly", style="magenta", width=10)
+        table.add_column("Indicator", style="green", width=24)
+        table.add_column("Events", width=8)
+        table.add_column("Monitors", style="yellow")
+
+        for e in entries:
+            details = e.get("details", {}) or {}
+            score = float(details.get("anomaly_score", 0.0))
+            table.add_row(
+                str(e.get("timestamp", "?"))[:26],
+                str(e.get("severity", "?")),
+                f"{score:.2f}",
+                str(details.get("indicator", "?")),
+                str(details.get("event_count", "?")),
+                ",".join(details.get("monitors", []) or []),
+            )
+        console.print(table)
+    else:
+        for e in entries:
+            details = e.get("details", {}) or {}
+            score = float(details.get("anomaly_score", 0.0))
+            print(
+                f"[{str(e.get('timestamp', '?'))[:19]}] "
+                f"{str(e.get('severity', '?')):10s} "
+                f"anomaly={score:6.2f} "
+                f"indicator={details.get('indicator', '?')} "
+                f"events={details.get('event_count', '?')} "
+                f"monitors={','.join(details.get('monitors', []) or [])}"
+            )
+
+
+def cmd_split(args, config):
+    """Split alerts by monitor and optionally export separate files."""
+    alert_log = config.get("alerts", {}).get("alert_log", "/var/log/lysec/alerts.log")
+    entries = read_log_entries(alert_log)
+    entries = _filter_entries_last(entries, args.last)
+
+    buckets: dict[str, list[dict]] = {}
+    for entry in entries:
+        mon = str(entry.get("monitor", "unknown") or "unknown")
+        buckets.setdefault(mon, []).append(entry)
+
+    if not buckets:
+        _print_info("No entries found for split criteria.")
+        return
+
+    if HAS_RICH:
+        table = Table(title="LySec Monitor Split", box=box.ROUNDED, show_lines=True)
+        table.add_column("Monitor", style="green")
+        table.add_column("Alerts", style="cyan")
+        table.add_column("Top Events", style="yellow")
+        for mon in sorted(buckets.keys()):
+            mon_entries = buckets[mon]
+            event_counts: dict[str, int] = {}
+            for e in mon_entries:
+                ev = str(e.get("event_type", "?"))
+                event_counts[ev] = event_counts.get(ev, 0) + 1
+            top_events = ", ".join(
+                f"{k}:{v}" for k, v in sorted(event_counts.items(), key=lambda item: item[1], reverse=True)[:3]
+            )
+            table.add_row(mon, str(len(mon_entries)), top_events or "-")
+        console.print(table)
+    else:
+        print("Monitor split summary")
+        for mon in sorted(buckets.keys()):
+            print(f"- {mon}: {len(buckets[mon])} alerts")
+
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for mon in sorted(buckets.keys()):
+            out_file = out_dir / f"{mon}.json"
+            with open(out_file, "w", encoding="utf-8") as fh:
+                json.dump(buckets[mon], fh, indent=2, default=str)
+        _print_success(f"Per-monitor exports written to {out_dir}")
+
+
+SCENARIOS = {
+    "usb_login_modify": ["USB_DEVICE_ATTACHED", "LOGIN_SUCCESS", "FILE_MODIFIED"],
+    "usb_login_delete": ["USB_DEVICE_ATTACHED", "LOGIN_SUCCESS", "FILE_DELETED"],
+    "usb_to_priv_esc": ["USB_DEVICE_ATTACHED", "LOGIN_SUCCESS", "PRIVILEGE_ESCALATION"],
+    "recon_to_priv": ["NEW_INTERFACE", "PROMISCUOUS_MODE", "PRIVILEGE_ESCALATION"],
+}
+
+
+def cmd_correlate(args, config):
+    """Find ordered multi-step attack chains in alert history."""
+    alert_log = config.get("alerts", {}).get("alert_log", "/var/log/lysec/alerts.log")
+    entries = read_log_entries(alert_log)
+    entries = _filter_entries_last(entries, args.last)
+
+    sequence = _resolve_sequence(args.scenario, args.sequence)
+    if not sequence:
+        _print_error("Provide --scenario or --sequence EVENT1,EVENT2,EVENT3")
+        return
+
+    try:
+        max_span = parse_duration(args.window)
+    except ValueError as exc:
+        _print_error(str(exc))
+        return
+
+    findings = _find_ordered_sequences(entries, sequence, max_span)
+    if not findings:
+        _print_info("No correlated chains found for specified criteria.")
+        return
+
+    if HAS_RICH:
+        table = Table(title="LySec Correlated Chains", box=box.ROUNDED, show_lines=True)
+        table.add_column("Start", style="cyan", width=26)
+        table.add_column("End", style="cyan", width=26)
+        table.add_column("Span", style="magenta", width=10)
+        table.add_column("Sequence", style="green")
+        table.add_column("Evidence", style="yellow")
+        for chain in findings[: args.top]:
+            ev_summary = " | ".join(f"{e.get('monitor', '?')}:{e.get('event_type', '?')}" for e in chain["events"])
+            table.add_row(
+                chain["start"][:26],
+                chain["end"][:26],
+                chain["span"],
+                " -> ".join(sequence),
+                ev_summary,
+            )
+        console.print(table)
+    else:
+        for chain in findings[: args.top]:
+            print(
+                f"[{chain['start'][:19]} -> {chain['end'][:19]}] "
+                f"span={chain['span']} seq={' -> '.join(sequence)}"
+            )
+
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.output, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "sequence": sequence,
+                    "scenario": args.scenario,
+                    "window": args.window,
+                    "result_count": len(findings),
+                    "chains": findings[: args.top],
+                },
+                fh,
+                indent=2,
+                default=str,
+            )
+        _print_success(f"Correlation report written to {args.output}")
+
+
 def cmd_search(args, config):
     """Full-text search across forensic logs."""
     log_dir = config["logging"]["log_dir"]
@@ -357,6 +571,82 @@ def _parse_ts(ts_str: str | None):
         return None
 
 
+def _filter_entries_last(entries: list[dict], last: str | None) -> list[dict]:
+    if not last:
+        return entries
+    delta = parse_duration(last)
+    cutoff = datetime.now(timezone.utc) - delta
+    filtered = []
+    for e in entries:
+        ts = _parse_ts(e.get("timestamp"))
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts >= cutoff:
+            filtered.append(e)
+    return filtered
+
+
+def _resolve_sequence(scenario: str | None, sequence: str | None) -> list[str]:
+    if sequence:
+        return [s.strip() for s in sequence.split(",") if s.strip()]
+    if scenario:
+        return SCENARIOS.get(scenario, [])
+    return []
+
+
+def _find_ordered_sequences(
+    entries: list[dict],
+    sequence: list[str],
+    max_span: timedelta,
+) -> list[dict]:
+    if len(sequence) < 2:
+        return []
+
+    events = []
+    for e in entries:
+        ts = _parse_ts(e.get("timestamp"))
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        events.append((ts, e))
+
+    events.sort(key=lambda item: item[0])
+    findings: list[dict] = []
+
+    for idx, (start_ts, start_event) in enumerate(events):
+        if str(start_event.get("event_type", "")) != sequence[0]:
+            continue
+
+        chain = [start_event]
+        current_step = 1
+        end_ts = start_ts
+
+        for j in range(idx + 1, len(events)):
+            ts, entry = events[j]
+            if ts - start_ts > max_span:
+                break
+            if str(entry.get("event_type", "")) == sequence[current_step]:
+                chain.append(entry)
+                end_ts = ts
+                current_step += 1
+                if current_step == len(sequence):
+                    findings.append(
+                        {
+                            "start": start_ts.isoformat(),
+                            "end": end_ts.isoformat(),
+                            "span": str(end_ts - start_ts),
+                            "events": chain,
+                        }
+                    )
+                    break
+
+    findings.sort(key=lambda c: c["start"], reverse=True)
+    return findings
+
+
 def _hash_file(filepath: str) -> str:
     h = hashlib.sha256()
     with open(filepath, "rb") as f:
@@ -422,6 +712,26 @@ def main():
     p_alerts.add_argument("--severity", "-s", help="Filter by severity (INFO/LOW/MEDIUM/HIGH/CRITICAL)")
     p_alerts.add_argument("--last", "-l", help="Show alerts from last duration (e.g., 1h, 30m, 2d)")
 
+    # anomalies
+    p_anom = sub.add_parser("anomalies", help="Rank live ML anomaly incidents")
+    p_anom.add_argument("--last", "-l", help="Show anomalies from last duration (e.g., 1h, 30m, 2d)")
+    p_anom.add_argument("--top", "-t", type=int, default=20, help="Max incidents to display (default: 20)")
+    p_anom.add_argument("--min-score", type=float, help="Minimum anomaly score to include")
+
+    # split
+    p_split = sub.add_parser("split", help="Show/export alerts separated by monitor")
+    p_split.add_argument("--last", "-l", help="Show alerts from last duration (e.g., 1h, 30m, 2d)")
+    p_split.add_argument("--output-dir", "-o", help="Write per-monitor JSON files to this directory")
+
+    # correlate
+    p_corr = sub.add_parser("correlate", help="Find ordered attack chains")
+    p_corr.add_argument("--scenario", choices=sorted(SCENARIOS.keys()), help="Predefined attack scenario")
+    p_corr.add_argument("--sequence", help="Custom event sequence CSV (e.g., USB_DEVICE_ATTACHED,LOGIN_SUCCESS,FILE_MODIFIED)")
+    p_corr.add_argument("--last", "-l", default="6h", help="Lookback duration (default: 6h)")
+    p_corr.add_argument("--window", "-w", default="30m", help="Max allowed span for one chain (default: 30m)")
+    p_corr.add_argument("--top", "-t", type=int, default=20, help="Max chains to display (default: 20)")
+    p_corr.add_argument("--output", "-o", help="Write correlation result JSON")
+
     # timeline
     p_tl = sub.add_parser("timeline", help="Generate event timeline")
     p_tl.add_argument("--start", help="Start time (ISO 8601)")
@@ -447,6 +757,9 @@ def main():
     commands = {
         "status": cmd_status,
         "alerts": cmd_alerts,
+        "anomalies": cmd_anomalies,
+        "split": cmd_split,
+        "correlate": cmd_correlate,
         "timeline": cmd_timeline,
         "search": cmd_search,
         "export": cmd_export,

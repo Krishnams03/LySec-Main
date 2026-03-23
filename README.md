@@ -15,7 +15,7 @@ kill, or prevent activity.
 ┌──────────────────────────────────────────────────────────────────┐
 │  lysecd (daemon)                                                 │
 │                                                                  │
-│  USB | Login | Network | Process | Filesystem monitors           │
+│  USB | Ports | Login | Network | Process | Filesystem monitors   │
 │                            │                                     │
 │                        Alert Engine                              │
 │                            │                                     │
@@ -32,10 +32,29 @@ kill, or prevent activity.
 | Monitor | Coverage | Example alerts |
 |---|---|---|
 | USB | Device attach/detach via udev/sysfs | Unknown device, removable media |
+| Ports | Dynamic udev hotplug across usb/thunderbolt/net/block/sound/drm/pci | Port device add/remove/change |
 | Login | auth.log/secure/wtmp/btmp | Root login, brute-force, sudo/su |
 | Network | Listeners, interfaces, promisc mode | New listener, rogue NIC, sniffing |
 | Process | Process table and UID changes | Suspicious binary, privilege escalation |
 | Filesystem | Critical paths via inotify/watchdog | passwd/shadow/ssh/cron tampering |
+
+### Dynamic Handling After Startup
+
+LySec continuously handles runtime changes after the daemon is already running:
+
+1. Ports hotplug: `ports` monitor captures realtime add/remove/change for configured subsystems.
+2. Filesystem changes: `filesystem` monitor watches configured paths and dynamically mounted removable media.
+3. Process activity: `process` monitor continuously diffs live process table for new processes and UID changes.
+
+Quick checks:
+
+```bash
+sudo lysec alerts --last 15m
+sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor ports
+sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor filesystem
+sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor process
+sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor ml
+```
 
 ## Why Detect-Only
 
@@ -45,11 +64,59 @@ kill, or prevent activity.
 4. Complements prevention controls (iptables, SELinux, fail2ban).
 5. Reduces outage risk from false positives.
 
+## Detection Modes
+
+LySec uses hybrid detection:
+
+1. Rule-based monitor alerts (deterministic events from usb/ports/login/network/process/filesystem).
+2. Heuristic cross-monitor correlation (`CORRELATED_INCIDENT`, FACES-v1 scoring).
+3. Live ML-style anomaly ranking (`ML_ANOMALY_INCIDENT`, OnlineZ-v1).
+
+This keeps runtime explainable while still prioritizing unusual multi-signal activity.
+
 ## Installation
 
 ```bash
 git clone <repo-url> && cd DF_Tool
+python3 -m venv .venv
+source .venv/bin/activate
+chmod +x install.sh uninstall.sh scripts/*.sh
 sudo ./install.sh
+```
+
+Step-by-step:
+
+1. Create and activate virtual environment.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+2. Grant execute permission for install/uninstall/demo scripts.
+
+```bash
+chmod +x install.sh uninstall.sh scripts/*.sh
+```
+
+3. Install LySec system-wide service and command links.
+
+```bash
+sudo ./install.sh
+```
+
+4. Optional dev-mode install in your current venv.
+
+```bash
+pip install -e .
+```
+
+5. Start and verify service.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now lysec
+sudo systemctl status lysec
 ```
 
 Installer actions:
@@ -92,6 +159,49 @@ Launch GUI:
 ```bash
 lysec-gui
 ```
+
+## Day-1 Forensic Checklist (Copy/Paste)
+
+Use this single block on a fresh Linux host.
+
+```bash
+# 1) clone + venv + permissions
+git clone <repo-url> && cd DF_Tool
+python3 -m venv .venv
+source .venv/bin/activate
+chmod +x install.sh uninstall.sh scripts/*.sh
+
+# 2) install + start service
+sudo ./install.sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now lysec
+
+# 3) health checks
+sudo systemctl status lysec
+sudo lysec status
+sudo lysec alerts --last 30m
+
+# 4) per-monitor separation (ports/process/login/filesystem/etc)
+sudo lysec split --last 2h --output-dir /tmp/lysec_split
+
+# 5) attack-chain correlation (example: usb -> login -> file modify)
+sudo lysec correlate --scenario usb_login_modify --last 6h --window 30m --top 20 --output /tmp/lysec_chain_report.json
+
+# 6) ml anomaly triage
+sudo lysec anomalies --last 2h --top 20 --min-score 60
+
+# 7) timeline + export + integrity
+sudo lysec timeline --start 2026-03-23T00:00:00 --end 2026-03-23T23:59:59
+sudo lysec export --format json --output /tmp/lysec_evidence.json --source all
+sudo lysec export --format csv --output /tmp/lysec_timeline.csv --source all
+sudo lysec verify
+```
+
+Expected artifacts:
+
+1. `/tmp/lysec_split/*.json` per-monitor alert files.
+2. `/tmp/lysec_chain_report.json` chain-correlation report.
+3. `/tmp/lysec_evidence.json` and `/tmp/lysec_timeline.csv` exported evidence.
 
 ## Operational Timeline Runbook
 
@@ -229,22 +339,140 @@ Analysis: expected final state is inactive/dead.
 6. Run `lysec verify` before sharing evidence.
 7. Run `lysec-eval` for campaign-level incident correlation.
 
+## Coordinator Demo (USB + Process + Filesystem)
+
+Use this exact sequence tomorrow to demonstrate monitor coverage end-to-end.
+
+### Terminal A - start and show service health
+
+```bash
+sudo systemctl start lysec
+sudo systemctl status lysec
+sudo lysec status
+```
+
+What this proves:
+1. Daemon is active.
+2. LySec CLI can read runtime state.
+3. Log paths are available.
+
+### Terminal B - live filtered event feed
+
+```bash
+sudo python3 scripts/live_demo_view.py
+```
+
+What this shows:
+1. Real-time alert stream.
+2. Only `usb`, `process`, and `filesystem` events are displayed.
+
+### Terminal C - trigger demo events
+
+```bash
+chmod +x scripts/demo_triggers.sh
+sudo bash scripts/demo_triggers.sh
+```
+
+What this triggers:
+1. Filesystem create/modify/delete in `/tmp`.
+2. Process suspicious-command event (best effort, depends on installed tools).
+3. USB prompt for manual plug/unplug.
+
+### Manual USB step (during Terminal C)
+
+1. Plug in a USB flash drive.
+2. Wait 3-5 seconds.
+3. Unplug the USB drive.
+
+Expected live output in Terminal B:
+1. `USB_DEVICE_ATTACHED`
+2. `USB_DEVICE_REMOVED`
+
+### Post-demo verification commands
+
+```bash
+sudo lysec alerts --last 15m
+sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor filesystem
+sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor process
+sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor usb
+```
+
+### How to explain analysis to coordinator
+
+1. Time-order proof: events are timestamped in UTC and sortable.
+2. Multi-source proof: USB, process, and filesystem are independently monitored.
+3. Forensic integrity proof: run `sudo lysec verify` to validate log manifests.
+4. Design intent proof: LySec is detect-and-log only, preserving evidence state.
+
 ## CLI Commands
+
+Use these commands as a practical forensic workflow reference.
+
+### Service and Health
 
 ```bash
 sudo lysec status
+sudo systemctl status lysec
+sudo journalctl -u lysec -f
+```
+
+### Alert Triage
+
+```bash
 sudo lysec alerts --severity HIGH --last 2h
+sudo lysec anomalies --last 2h --top 20 --min-score 60
+sudo lysec alerts --last 15m
+```
+
+### Per-Monitor Separation
+
+```bash
+sudo lysec split --last 2h --output-dir /tmp/lysec_split
+sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59 --monitor usb
+sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59 --monitor ports
+sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59 --monitor login
+sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59 --monitor process
+sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59 --monitor filesystem
+sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59 --monitor network
+sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59 --monitor ml
+```
+
+### Correlation and Attack Chains
+
+```bash
+sudo lysec correlate --scenario usb_login_modify --last 6h --window 30m --top 20 --output /tmp/lysec_chain_report.json
+sudo lysec correlate --scenario usb_login_delete --last 6h --window 30m
+sudo lysec correlate --scenario usb_to_priv_esc --last 12h --window 1h
+sudo lysec correlate --sequence USB_DEVICE_ATTACHED,LOGIN_SUCCESS,FILE_MODIFIED --last 6h --window 45m
+```
+
+### Timeline and Search
+
+```bash
 sudo lysec timeline --start 2026-02-20T00:00:00 --end 2026-02-21T23:59:59
-sudo lysec timeline --monitor usb
 sudo lysec search --query "nmap"
+sudo lysec search --query "root"
+sudo lysec search --query "192.168."
+```
+
+### Evidence Export and Integrity
+
+```bash
 sudo lysec export --format json --output /tmp/evidence.json
 sudo lysec export --format csv --output /tmp/timeline.csv
 sudo lysec verify
 ```
 
+Use `lysec anomalies` to rank only live ML anomaly incidents by anomaly score for fast triage.
+
+Use `lysec split` to get separate per-monitor outputs (ports, process, login, filesystem, usb, network, ml, correlation).
+
+Use `lysec correlate` to detect attack chains such as USB insertion followed by login then file modification.
+
 ## Correlation Evaluation
 
-Replay historical alerts and compare baseline vs FACES-v1 scoring:
+Replay historical alerts and compare baseline vs FACES-v1 scoring.
+Optional local ML-style anomaly ranking can be enabled to prioritize unusual incidents.
 
 ```bash
 sudo lysec-eval \
@@ -252,6 +480,8 @@ sudo lysec-eval \
   --window-sec 300 \
   --baseline-min-score 8 \
   --faces-min-score 45 \
+  --ml-anomaly \
+  --ml-top 10 \
   --output-json /tmp/lysec_eval.json \
   --output-csv /tmp/lysec_eval_incidents.csv \
   --top 10
@@ -272,6 +502,13 @@ Primary config file:
 ```bash
 /etc/lysec/lysec.yaml
 ```
+
+Key live anomaly toggles (under `alerts.ml_anomaly`):
+
+1. `enabled`: turn live anomaly scoring on/off.
+2. `min_score`: anomaly threshold for emitting `ML_ANOMALY_INCIDENT`.
+3. `warmup_samples`: number of feature samples before scoring starts.
+4. `emit_suppress_sec`: suppression window to prevent duplicate incident floods.
 
 Reload config without full restart:
 
@@ -314,12 +551,101 @@ Each line is JSON and SIEM-friendly:
 | `/var/lib/lysec/evidence/` | Evidence artifacts |
 | `/var/run/lysec/lysecd.pid` | PID file |
 
+## Tamper Resistance (Production)
+
+If an attacker gains privileged shell access, they may try to stop local monitoring.
+The goal is to make stop/tamper actions noisy and detectable, not silent.
+
+### Hardened systemd profile
+
+A stricter unit template is included at:
+
+- `systemd/lysec-hardened.service`
+
+Apply it:
+
+```bash
+sudo cp systemd/lysec-hardened.service /etc/systemd/system/lysec.service
+sudo systemctl daemon-reload
+sudo systemctl restart lysec
+sudo systemctl status lysec
+```
+
+### auditd tamper rules
+
+Audit rules are included at:
+
+- `security/auditd/lysec.rules`
+
+Apply them:
+
+```bash
+sudo apt install -y auditd audispd-plugins
+sudo cp security/auditd/lysec.rules /etc/audit/rules.d/lysec.rules
+sudo augenrules --load
+sudo systemctl restart auditd
+```
+
+Validate rules:
+
+```bash
+sudo auditctl -l | grep lysec
+```
+
+Query possible tamper events:
+
+```bash
+sudo ausearch -k lysec_tamper
+sudo ausearch -k lysec_systemctl
+sudo ausearch -k lysec_kill
+```
+
+Recommended architecture in enterprise:
+
+1. Keep local logs for endpoint timeline.
+2. Stream alerts/logs to a remote collector (SIEM/syslog) in near real time.
+3. Treat service stop/restart and log tamper as high-severity incidents.
+
 ## GUI Notes
 
 The GUI (`lysec-gui`) provides:
 1. Service controls (start, stop, restart).
 2. Alerts table view.
 3. Timeline viewer.
+4. Decision Support panel with risk hints.
+5. Local/UTC time toggle.
+
+If logs/alerts appear empty in GUI:
+1. Confirm service is running: `sudo systemctl status lysec`.
+2. Confirm log files exist: `sudo ls -l /var/log/lysec/`.
+3. Run GUI with read permissions to logs (often root): `sudo lysec-gui`.
+4. Use CLI to verify data exists: `sudo lysec alerts --last 30m`.
+
+Time interpretation:
+1. LySec records timestamps in UTC for forensic consistency.
+2. GUI can display either UTC or local time (Time selector).
+3. For reports, explicitly mention timezone used.
+
+Decision-making guidance:
+1. Start with severity trend (CRITICAL/HIGH first).
+2. Check monitor diversity (same indicator across multiple monitors increases confidence).
+3. Build sequence from timeline: access -> execution -> persistence/network.
+4. Export evidence and run `lysec verify` before sharing.
+
+Filesystem events on USB not visible troubleshooting:
+1. Ensure filesystem monitor is enabled in `/etc/lysec/lysec.yaml`.
+2. Ensure watch paths include mount roots (`/media`, `/run/media`, `/mnt`).
+3. Restart service after config change: `sudo systemctl restart lysec`.
+4. Confirm live events: `sudo lysec alerts --last 10m | grep filesystem`.
+5. Delete/create file on mounted USB and re-check timeline window.
+
+Quick validation commands:
+
+```bash
+sudo systemctl restart lysec
+sudo lysec alerts --last 10m
+sudo lysec timeline --start 2026-03-23T00:00:00 --end 2026-03-23T23:59:59 --monitor filesystem
+```
 
 If GUI launch fails on minimal servers:
 

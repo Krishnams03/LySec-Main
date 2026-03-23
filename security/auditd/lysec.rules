@@ -1,0 +1,19 @@
+# LySec tamper-detection rules for auditd
+# Place in /etc/audit/rules.d/lysec.rules then reload auditd.
+
+# Monitor service unit and binaries
+-w /etc/systemd/system/lysec.service -p wa -k lysec_tamper
+-w /usr/local/bin/lysec -p wa -k lysec_tamper
+-w /usr/local/bin/lysecd -p wa -k lysec_tamper
+
+# Monitor config and log directories
+-w /etc/lysec/ -p wa -k lysec_config
+-w /var/log/lysec/ -p wa -k lysec_logs
+
+# Monitor stop/disable attempts through systemctl
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/systemctl -k lysec_systemctl
+-a always,exit -F arch=b32 -S execve -F path=/usr/bin/systemctl -k lysec_systemctl
+
+# Monitor kill attempts that may target daemon processes
+-a always,exit -F arch=b64 -S kill -S tgkill -S tkill -k lysec_kill
+-a always,exit -F arch=b32 -S kill -S tgkill -S tkill -k lysec_kill

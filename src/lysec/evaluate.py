@@ -5,6 +5,7 @@ Replay alert logs and compare baseline correlation scoring against FACES-v1.
 Usage examples:
     lysec-eval --alerts-file /var/log/lysec/alerts.log
     lysec-eval --alerts-file ./alerts.jsonl --window-sec 300 --top 10
+    lysec-eval --alerts-file ./alerts.jsonl --ml-anomaly --ml-top 10
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any
+import math
 
 
 SEVERITY_INFO = "INFO"
@@ -324,6 +326,7 @@ def _summary_dict(
     baseline: ReplayCorrelator,
     faces: ReplayCorrelator,
     source_alert_count: int,
+    anomaly_incidents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     base_inc = baseline.incidents
     face_inc = faces.incidents
@@ -350,7 +353,91 @@ def _summary_dict(
         summary["faces_avg_event_count"] = round(mean(i["event_count"] for i in face_inc), 2)
         summary["faces_avg_monitor_count"] = round(mean(i["monitor_count"] for i in face_inc), 2)
 
+    anomaly_incidents = anomaly_incidents or []
+    if anomaly_incidents:
+        summary["anomaly_incident_count"] = len(anomaly_incidents)
+        summary["anomaly_avg_score"] = round(
+            mean(float(i.get("anomaly_score", 0.0)) for i in anomaly_incidents), 2
+        )
+
     return summary
+
+
+def _safe_stdev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 1.0
+    m = mean(values)
+    var = sum((v - m) ** 2 for v in values) / (len(values) - 1)
+    return max(1e-9, math.sqrt(var))
+
+
+def _z(v: float, mu: float, sigma: float) -> float:
+    return (v - mu) / max(1e-9, sigma)
+
+
+def _build_anomaly_incidents(
+    faces_incidents: list[dict[str, Any]],
+    top: int,
+) -> list[dict[str, Any]]:
+    """
+    Lightweight local ML-style ranking using z-score anomaly features.
+    Learns feature distribution from the replayed incident population.
+    """
+    if not faces_incidents:
+        return []
+
+    event_vals = [float(i.get("event_count", 0.0)) for i in faces_incidents]
+    monitor_vals = [float(i.get("monitor_count", 0.0)) for i in faces_incidents]
+    score_vals = [float(i.get("score", 0.0)) for i in faces_incidents]
+    chain_vals = [float(len(i.get("matched_chains", []) or [])) for i in faces_incidents]
+
+    indicator_counts = Counter(str(i.get("indicator", "unknown")) for i in faces_incidents)
+    rarity_vals = [1.0 / max(1.0, float(indicator_counts[str(i.get("indicator", "unknown"))])) for i in faces_incidents]
+
+    mu_event, sd_event = mean(event_vals), _safe_stdev(event_vals)
+    mu_monitor, sd_monitor = mean(monitor_vals), _safe_stdev(monitor_vals)
+    mu_score, sd_score = mean(score_vals), _safe_stdev(score_vals)
+    mu_chain, sd_chain = mean(chain_vals), _safe_stdev(chain_vals)
+    mu_rarity, sd_rarity = mean(rarity_vals), _safe_stdev(rarity_vals)
+
+    ranked: list[dict[str, Any]] = []
+    for idx, incident in enumerate(faces_incidents):
+        ev = float(incident.get("event_count", 0.0))
+        mon = float(incident.get("monitor_count", 0.0))
+        sc = float(incident.get("score", 0.0))
+        ch = float(len(incident.get("matched_chains", []) or []))
+        rar = rarity_vals[idx]
+
+        z_event = max(0.0, _z(ev, mu_event, sd_event))
+        z_monitor = max(0.0, _z(mon, mu_monitor, sd_monitor))
+        z_score = max(0.0, _z(sc, mu_score, sd_score))
+        z_chain = max(0.0, _z(ch, mu_chain, sd_chain))
+        z_rarity = max(0.0, _z(rar, mu_rarity, sd_rarity))
+
+        # Weighted anomaly confidence in [0, 100]
+        raw = (
+            (2.4 * z_score)
+            + (1.8 * z_monitor)
+            + (1.6 * z_event)
+            + (1.0 * z_chain)
+            + (1.4 * z_rarity)
+        )
+        anomaly_score = round(min(100.0, raw * 18.0), 2)
+
+        item = dict(incident)
+        item["model"] = "anomaly"
+        item["anomaly_score"] = anomaly_score
+        item["anomaly_features"] = {
+            "z_score": round(z_score, 3),
+            "z_monitor": round(z_monitor, 3),
+            "z_event": round(z_event, 3),
+            "z_chain": round(z_chain, 3),
+            "z_rarity": round(z_rarity, 3),
+        }
+        ranked.append(item)
+
+    ranked.sort(key=lambda i: float(i.get("anomaly_score", 0.0)), reverse=True)
+    return ranked[: max(1, int(top))]
 
 
 def _write_json_output(
@@ -358,19 +445,28 @@ def _write_json_output(
     baseline: ReplayCorrelator,
     faces: ReplayCorrelator,
     source_alert_count: int,
+    anomaly_incidents: list[dict[str, Any]] | None = None,
 ):
+    anomaly_incidents = anomaly_incidents or []
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "summary": _summary_dict(baseline, faces, source_alert_count),
+        "summary": _summary_dict(baseline, faces, source_alert_count, anomaly_incidents),
         "baseline_incidents": baseline.incidents,
         "faces_incidents": faces.incidents,
+        "anomaly_incidents": anomaly_incidents,
     }
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
 
 
-def _write_csv_output(output_path: str, baseline: ReplayCorrelator, faces: ReplayCorrelator):
+def _write_csv_output(
+    output_path: str,
+    baseline: ReplayCorrelator,
+    faces: ReplayCorrelator,
+    anomaly_incidents: list[dict[str, Any]] | None = None,
+):
+    anomaly_incidents = anomaly_incidents or []
     rows: list[dict[str, Any]] = []
     for incident in baseline.incidents:
         rows.append(
@@ -403,6 +499,25 @@ def _write_csv_output(output_path: str, baseline: ReplayCorrelator, faces: Repla
                 "trigger_event": incident.get("trigger_event"),
                 "matched_chains": ";".join(incident.get("matched_chains", [])),
                 "components": json.dumps(incident.get("components", {}), sort_keys=True),
+                "anomaly_score": "",
+            }
+        )
+
+    for incident in anomaly_incidents:
+        rows.append(
+            {
+                "model": "anomaly",
+                "epoch": incident.get("epoch"),
+                "indicator": incident.get("indicator"),
+                "campaign_key": incident.get("campaign_key"),
+                "score": incident.get("score"),
+                "event_count": incident.get("event_count"),
+                "monitor_count": incident.get("monitor_count"),
+                "monitors": ";".join(incident.get("monitors", [])),
+                "trigger_event": incident.get("trigger_event"),
+                "matched_chains": ";".join(incident.get("matched_chains", [])),
+                "components": json.dumps(incident.get("anomaly_features", {}), sort_keys=True),
+                "anomaly_score": incident.get("anomaly_score"),
             }
         )
 
@@ -418,6 +533,7 @@ def _write_csv_output(output_path: str, baseline: ReplayCorrelator, faces: Repla
         "trigger_event",
         "matched_chains",
         "components",
+        "anomaly_score",
     ]
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -439,6 +555,17 @@ def main():
     parser.add_argument("--faces-min-score", type=float, default=45.0)
     parser.add_argument("--emit-suppress-sec", type=int, default=180)
     parser.add_argument("--top", type=int, default=10)
+    parser.add_argument(
+        "--ml-anomaly",
+        action="store_true",
+        help="Enable lightweight local anomaly ranking over FACES incidents",
+    )
+    parser.add_argument(
+        "--ml-top",
+        type=int,
+        default=10,
+        help="Number of top anomaly-ranked incidents to include",
+    )
     parser.add_argument("--output-json", help="Write full evaluation report to JSON file")
     parser.add_argument("--output-csv", help="Write incident-level results to CSV file")
     args = parser.parse_args()
@@ -469,12 +596,36 @@ def main():
 
     print_summary(baseline, faces, len(alerts), args.top)
 
+    anomaly_incidents: list[dict[str, Any]] = []
+    if args.ml_anomaly:
+        anomaly_incidents = _build_anomaly_incidents(faces.incidents, args.ml_top)
+        print()
+        print("Top ML-style anomaly incidents")
+        for incident in anomaly_incidents:
+            print(
+                f"- anomaly={incident.get('anomaly_score', 0):.2f} "
+                f"score={incident.get('score', 0):.2f} "
+                f"indicator={incident.get('indicator')} "
+                f"events={incident.get('event_count')} monitors={incident.get('monitor_count')}"
+            )
+
     if args.output_json:
-        _write_json_output(args.output_json, baseline, faces, len(alerts))
+        _write_json_output(
+            args.output_json,
+            baseline,
+            faces,
+            len(alerts),
+            anomaly_incidents=anomaly_incidents,
+        )
         print(f"JSON report written: {args.output_json}")
 
     if args.output_csv:
-        _write_csv_output(args.output_csv, baseline, faces)
+        _write_csv_output(
+            args.output_csv,
+            baseline,
+            faces,
+            anomaly_incidents=anomaly_incidents,
+        )
         print(f"CSV report written: {args.output_csv}")
 
 

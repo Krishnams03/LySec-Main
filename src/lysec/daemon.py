@@ -25,11 +25,13 @@ from lysec.monitors.login_monitor import LoginMonitor
 from lysec.monitors.network_monitor import NetworkMonitor
 from lysec.monitors.process_monitor import ProcessMonitor
 from lysec.monitors.filesystem_monitor import FilesystemMonitor
+from lysec.monitors.ports_monitor import PortsMonitor
 
 logger = logging.getLogger("lysec.daemon")
 
 MONITORS = {
     "usb": USBMonitor,
+    "ports": PortsMonitor,
     "login": LoginMonitor,
     "network": NetworkMonitor,
     "process": ProcessMonitor,

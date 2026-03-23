@@ -13,10 +13,12 @@ import os
 import smtplib
 import time
 import uuid
+from statistics import mean
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
+import math
 
 try:
     import urllib.request
@@ -101,6 +103,31 @@ class AlertEngine:
             ],
         )
 
+        # Online ML-style anomaly settings
+        ml_cfg = self._config.get("ml_anomaly", {})
+        self._ml_enabled = ml_cfg.get("enabled", True)
+        self._ml_model_name = ml_cfg.get("model_name", "OnlineZ-v1")
+        self._ml_window_sec = int(ml_cfg.get("window_sec", 300))
+        self._ml_min_related_events = int(ml_cfg.get("min_related_events", 3))
+        self._ml_min_unique_monitors = int(ml_cfg.get("min_unique_monitors", 2))
+        self._ml_min_score = float(ml_cfg.get("min_score", 60.0))
+        self._ml_emit_suppress_sec = int(ml_cfg.get("emit_suppress_sec", 180))
+        self._ml_warmup_samples = int(ml_cfg.get("warmup_samples", 20))
+        self._ml_feature_history_limit = int(ml_cfg.get("feature_history_limit", 1000))
+        self._ml_recent_alerts: list[dict[str, Any]] = []
+        self._ml_last_emitted: dict[str, float] = {}
+        self._ml_feature_history: list[dict[str, float]] = []
+        self._ml_feature_weights = ml_cfg.get(
+            "feature_weights",
+            {
+                "corr_score": 2.4,
+                "monitor_count": 1.8,
+                "event_count": 1.6,
+                "chain_count": 1.0,
+                "rarity": 1.4,
+            },
+        )
+
     # ──────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────
@@ -142,6 +169,10 @@ class AlertEngine:
         # ── Correlation ──
         if self._corr_enabled and event_type != "CORRELATED_INCIDENT":
             self._maybe_emit_correlation(alert)
+
+        # ── Live anomaly (hybrid ML-style ranking) ──
+        if self._ml_enabled and event_type not in ("CORRELATED_INCIDENT", "ML_ANOMALY_INCIDENT"):
+            self._maybe_emit_live_anomaly(alert)
 
     # ──────────────────────────────────────────
     # Correlation logic
@@ -298,9 +329,19 @@ class AlertEngine:
     def _select_primary_indicator(
         self, related: list[dict[str, Any]], trigger_indicators: set[str]
     ) -> tuple[str, int]:
+        return self._select_primary_indicator_from_pool(
+            self._corr_recent_alerts,
+            trigger_indicators,
+        )
+
+    def _select_primary_indicator_from_pool(
+        self,
+        pool: list[dict[str, Any]],
+        trigger_indicators: set[str],
+    ) -> tuple[str, int]:
         indicator_counts: dict[str, int] = {ind: 0 for ind in trigger_indicators}
 
-        for candidate in self._corr_recent_alerts:
+        for candidate in pool:
             c_inds = self._extract_indicators(candidate.get("details", {}))
             for ind in indicator_counts:
                 if ind in c_inds:
@@ -311,6 +352,132 @@ class AlertEngine:
 
         primary = min(indicator_counts.items(), key=lambda item: item[1])
         return primary[0], max(1, primary[1])
+
+    # ──────────────────────────────────────────
+    # Live anomaly logic
+    # ──────────────────────────────────────────
+    def _maybe_emit_live_anomaly(self, alert: dict[str, Any]):
+        now = time.time()
+        window_start = now - self._ml_window_sec
+
+        self._ml_recent_alerts.append(alert)
+        self._ml_recent_alerts = [
+            a for a in self._ml_recent_alerts if float(a.get("epoch", 0.0)) >= window_start
+        ]
+
+        trigger_indicators = self._extract_indicators(alert.get("details", {}))
+        if not trigger_indicators:
+            return
+
+        related: list[dict[str, Any]] = []
+        for candidate in self._ml_recent_alerts:
+            c_inds = self._extract_indicators(candidate.get("details", {}))
+            if trigger_indicators.intersection(c_inds):
+                related.append(candidate)
+
+        if len(related) < self._ml_min_related_events:
+            return
+
+        monitors = {a.get("monitor", "unknown") for a in related}
+        if len(monitors) < self._ml_min_unique_monitors:
+            return
+
+        indicator_key, indicator_freq = self._select_primary_indicator_from_pool(
+            self._ml_recent_alerts,
+            trigger_indicators,
+        )
+        corr_score, score_components, matched_chains = self._score_correlated_incident(
+            related,
+            indicator_freq,
+        )
+
+        feature_vector = {
+            "corr_score": float(corr_score),
+            "event_count": float(len(related)),
+            "monitor_count": float(len(monitors)),
+            "chain_count": float(len(matched_chains)),
+            "rarity": 1.0 / max(1.0, float(indicator_freq)),
+        }
+
+        anomaly_score, z_features, ready = self._compute_live_anomaly_score(feature_vector)
+        self._append_ml_feature(feature_vector)
+
+        if not ready or anomaly_score < self._ml_min_score:
+            return
+
+        campaign_key = f"{indicator_key}|{'|'.join(sorted(monitors))}"
+        last_emit = self._ml_last_emitted.get(campaign_key, 0)
+        if now - last_emit < self._ml_emit_suppress_sec:
+            return
+        self._ml_last_emitted[campaign_key] = now
+
+        ml_severity = self._score_to_severity(anomaly_score)
+        ml_alert = {
+            "alert_id": str(uuid.uuid4()),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "epoch": now,
+            "monitor": "ml",
+            "event_type": "ML_ANOMALY_INCIDENT",
+            "severity": ml_severity,
+            "message": (
+                "Live anomaly incident detected "
+                f"for indicator '{indicator_key}'"
+            ),
+            "details": {
+                "model": self._ml_model_name,
+                "indicator": indicator_key,
+                "anomaly_score": round(anomaly_score, 2),
+                "z_features": z_features,
+                "feature_vector": {
+                    k: round(v, 3) for k, v in feature_vector.items()
+                },
+                "weights": self._ml_feature_weights,
+                "window_sec": self._ml_window_sec,
+                "event_count": len(related),
+                "monitors": sorted(monitors),
+                "trigger_event": alert.get("event_type"),
+                "matched_chains": matched_chains,
+                "correlation_score": corr_score,
+                "correlation_components": score_components,
+                "contributing_alert_ids": [a.get("alert_id") for a in related],
+            },
+        }
+        self._dispatch(ml_alert)
+
+    def _append_ml_feature(self, feature_vector: dict[str, float]):
+        self._ml_feature_history.append(feature_vector)
+        if len(self._ml_feature_history) > self._ml_feature_history_limit:
+            self._ml_feature_history = self._ml_feature_history[-self._ml_feature_history_limit :]
+
+    def _compute_live_anomaly_score(
+        self,
+        feature_vector: dict[str, float],
+    ) -> tuple[float, dict[str, float], bool]:
+        if len(self._ml_feature_history) < self._ml_warmup_samples:
+            return 0.0, {}, False
+
+        z_features: dict[str, float] = {}
+        weighted = 0.0
+
+        for key, value in feature_vector.items():
+            series = [float(item.get(key, 0.0)) for item in self._ml_feature_history]
+            mu = mean(series)
+            sigma = self._safe_stdev(series)
+            z = max(0.0, (float(value) - mu) / max(1e-9, sigma))
+            z_features[key] = round(z, 3)
+            weight = float(self._ml_feature_weights.get(key, 1.0))
+            weighted += weight * z
+
+        score = min(100.0, weighted * 18.0)
+        return round(score, 2), z_features, True
+
+    @staticmethod
+    def _safe_stdev(values: list[float]) -> float:
+        if len(values) < 2:
+            return 1.0
+        mu = mean(values)
+        var = sum((v - mu) ** 2 for v in values) / (len(values) - 1)
+        return max(1e-9, math.sqrt(var))
 
     @staticmethod
     def _score_to_severity(score: float) -> str:

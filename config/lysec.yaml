@@ -30,6 +30,19 @@ monitors:
     alert_on_new_device: true
     whitelist: []
 
+  ports:
+    enabled: true
+    poll_interval: 1
+    subsystems:
+      - usb
+      - thunderbolt
+      - net
+      - block
+      - sound
+      - drm
+      - pci
+    alert_on_change: false
+
   login:
     enabled: true
     watch_files:
@@ -84,7 +97,15 @@ monitors:
       - /root/.ssh
       - /tmp
       - /var/tmp
+      - /media
+      - /run/media
+      - /mnt
     recursive: true
+    watch_removable_media: true
+    mount_watch_roots:
+      - /media
+      - /run/media
+      - /mnt
     alert_on_modify: true
     alert_on_create: true
     alert_on_delete: true
@@ -117,6 +138,23 @@ alerts:
       - name: network_recon_chain
         events: [NEW_INTERFACE, PROMISCUOUS_MODE, NEW_LISTENER]
         bonus: 12
+
+  ml_anomaly:
+    enabled: true
+    model_name: OnlineZ-v1
+    window_sec: 300
+    min_related_events: 3
+    min_unique_monitors: 2
+    min_score: 60.0
+    emit_suppress_sec: 180
+    warmup_samples: 20
+    feature_history_limit: 1000
+    feature_weights:
+      corr_score: 2.4
+      monitor_count: 1.8
+      event_count: 1.6
+      chain_count: 1.0
+      rarity: 1.4
 
   email:
     enabled: false

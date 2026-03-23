@@ -172,6 +172,12 @@ class FilesystemMonitor(BaseMonitor):
         super().__init__(config, alert_engine)
         self._mon_cfg = config.get("monitors", {}).get("filesystem", {})
         self._observer = None
+        self._handler = None
+        self._watched_paths: set[str] = set()
+        self._watch_removable = bool(self._mon_cfg.get("watch_removable_media", True))
+        self._mount_roots = self._mon_cfg.get(
+            "mount_watch_roots", ["/media", "/run/media", "/mnt"]
+        )
 
     def setup(self):
         if not HAS_WATCHDOG:
@@ -179,39 +185,84 @@ class FilesystemMonitor(BaseMonitor):
             return
 
         self._observer = Observer()
-        handler = ForensicEventHandler(self._alert, self._mon_cfg)
+        self._handler = ForensicEventHandler(self._alert, self._mon_cfg)
         recursive = self._mon_cfg.get("recursive", True)
 
         watch_paths = self._mon_cfg.get("watch_paths", [])
-        scheduled = 0
         for path in watch_paths:
-            if os.path.exists(path):
-                try:
-                    self._observer.schedule(
-                        handler, path, recursive=recursive and os.path.isdir(path)
-                    )
-                    scheduled += 1
-                    logger.info("Watching: %s (recursive=%s)", path, recursive)
-                except Exception as exc:
-                    logger.error("Cannot watch %s: %s", path, exc)
-            else:
-                logger.warning("Watch path does not exist: %s", path)
+            self._schedule_watch(path, recursive=recursive)
 
-        if scheduled > 0:
+        # Also add currently mounted removable paths at startup.
+        if self._watch_removable:
+            self._watch_new_mount_points(recursive=recursive)
+
+        if self._watched_paths:
             self._observer.start()
-            logger.info("Filesystem observer started — watching %d paths", scheduled)
+            logger.info(
+                "Filesystem observer started — watching %d path(s)",
+                len(self._watched_paths),
+            )
         else:
             logger.warning("No valid paths to watch")
 
     def poll(self):
-        # Watchdog runs its own thread; poll is a no-op unless we want to
-        # do periodic integrity checks on specific files
-        pass
+        # Add new removable-media mount points discovered after daemon start.
+        if self._watch_removable and self._observer:
+            recursive = self._mon_cfg.get("recursive", True)
+            self._watch_new_mount_points(recursive=recursive)
 
     def teardown(self):
         if self._observer:
             self._observer.stop()
             self._observer.join(timeout=5)
+
+    def _schedule_watch(self, path: str, recursive: bool):
+        if not self._observer or not self._handler:
+            return
+
+        norm = os.path.abspath(path)
+        if norm in self._watched_paths:
+            return
+
+        if not os.path.exists(norm):
+            logger.warning("Watch path does not exist: %s", norm)
+            return
+
+        try:
+            self._observer.schedule(
+                self._handler,
+                norm,
+                recursive=recursive and os.path.isdir(norm),
+            )
+            self._watched_paths.add(norm)
+            logger.info("Watching: %s (recursive=%s)", norm, recursive)
+        except Exception as exc:
+            logger.error("Cannot watch %s: %s", norm, exc)
+
+    def _watch_new_mount_points(self, recursive: bool):
+        for mount in self._discover_mount_points():
+            self._schedule_watch(mount, recursive=recursive)
+
+    def _discover_mount_points(self) -> list[str]:
+        mounts: list[str] = []
+        roots = [os.path.abspath(r) for r in self._mount_roots]
+
+        try:
+            with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    mnt = parts[1].replace("\\040", " ")
+                    mnt_abs = os.path.abspath(mnt)
+                    for root in roots:
+                        if mnt_abs == root or mnt_abs.startswith(root + os.sep):
+                            mounts.append(mnt_abs)
+                            break
+        except Exception:
+            pass
+
+        return sorted(set(mounts))
 
 
 def _hash_file(filepath: str, algorithm: str = "sha256") -> str:
