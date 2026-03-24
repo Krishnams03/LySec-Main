@@ -608,6 +608,24 @@ sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --moni
 sudo lysec timeline --start 2026-03-22T00:00:00 --end 2026-03-22T23:59:59 --monitor usb
 ```
 
+### One-command showcase demo (USB + process + filesystem + fuzzy + watchdog)
+
+Use this when presenting to faculty and you need a full proof sequence quickly.
+
+```bash
+chmod +x scripts/demo_showcase.sh
+sudo python3 scripts/live_demo_view.py --show-fuzzy
+sudo bash scripts/demo_showcase.sh
+```
+
+What this one-shot demo covers:
+
+1. Filesystem create/modify/delete events.
+2. Fuzzy hash and fuzzy similarity fields on file modifications.
+3. Suspicious process event (best effort based on installed tools).
+4. USB attach/mount/remove events (manual plug/unplug step).
+5. Watchdog restart proof after primary daemon stop.
+
 ### How to explain analysis to coordinator
 
 1. Time-order proof: events are timestamped in UTC and sortable.

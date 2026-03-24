@@ -8,6 +8,7 @@ Design: DETECT & LOG only — alerts are informational, never preventive.
 """
 
 import json
+import hashlib
 import logging
 import os
 import smtplib
@@ -39,6 +40,11 @@ DEFAULT_MITRE_MAP = {
         "tactic": "Collection",
         "technique_id": "T1074",
         "technique_name": "Data Staged",
+    },
+    "USB_DEVICE_MOUNTED": {
+        "tactic": "Collection",
+        "technique_id": "T1005",
+        "technique_name": "Data from Local System",
     },
     "PORT_DEVICE_ADDED": {
         "tactic": "Initial Access",
@@ -242,6 +248,10 @@ class AlertEngine:
                 "rarity": 1.4,
             },
         )
+
+        integrity_cfg = self._config.get("integrity_chain", {})
+        self._integrity_chain_enabled = bool(integrity_cfg.get("enabled", False))
+        self._integrity_prev_hash = str(integrity_cfg.get("seed", ""))
 
     # ──────────────────────────────────────────
     # Public API
@@ -641,6 +651,10 @@ class AlertEngine:
             "path",
             "exe",
             "serial",
+            "dev_name",
+            "source_device",
+            "mount_point",
+            "filesystem_type",
             "host",
             "listener",
             "process_name",
@@ -676,10 +690,22 @@ class AlertEngine:
     def _write_alert_log(self, alert: dict):
         """Append JSON alert to dedicated alert log file."""
         try:
+            output_alert = dict(alert)
+            if self._integrity_chain_enabled:
+                integrity_hash = self._compute_integrity_hash(output_alert)
+                output_alert["integrity_hash"] = integrity_hash
+                self._integrity_prev_hash = integrity_hash
             with open(self._alert_log_path, "a") as f:
-                f.write(json.dumps(alert, default=str) + "\n")
+                f.write(json.dumps(output_alert, default=str) + "\n")
         except Exception as exc:
             logger.error("Failed to write alert log: %s", exc)
+
+    def _compute_integrity_hash(self, alert: dict[str, Any]) -> str:
+        chain_input = dict(alert)
+        chain_input.pop("integrity_hash", None)
+        canonical = json.dumps(chain_input, sort_keys=True, separators=(",", ":"), default=str)
+        payload = f"{self._integrity_prev_hash}{canonical}".encode("utf-8", errors="replace")
+        return hashlib.sha256(payload).hexdigest()
 
     def _log_alert(self, alert: dict):
         """Forward alert to the main forensic logger."""

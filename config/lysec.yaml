@@ -36,6 +36,10 @@ monitors:
     enabled: true
     poll_interval: 1
     alert_on_new_device: true
+    unknown_device_severity: MEDIUM
+    storage_device_severity: MEDIUM
+    emit_mount_event: true
+    mount_enrich_timeout_sec: 15
     whitelist: []
 
   ports:
@@ -130,6 +134,9 @@ alerts:
   alert_log: /var/log/lysec/alerts.log
   console: true
   syslog: true
+  integrity_chain:
+    enabled: true
+    seed: ""
 
   correlation:
     enabled: true

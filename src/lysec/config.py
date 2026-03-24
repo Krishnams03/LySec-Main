@@ -49,6 +49,10 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "poll_interval": 1,                 # seconds
             "alert_on_new_device": True,
+            "unknown_device_severity": "MEDIUM",
+            "storage_device_severity": "MEDIUM",
+            "emit_mount_event": True,
+            "mount_enrich_timeout_sec": 15,
             "whitelist": [],                    # list of known vendor:product ids
         },
         "ports": {
@@ -134,6 +138,10 @@ DEFAULT_CONFIG = {
         "alert_log": DEFAULT_ALERT_LOG,
         "console": True,
         "syslog": True,
+        "integrity_chain": {
+            "enabled": True,
+            "seed": "",
+        },
         "correlation": {
             "enabled": True,
             "model_name": "FACES-v1",
