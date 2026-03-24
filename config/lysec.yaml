@@ -38,6 +38,34 @@ monitors:
     alert_on_new_device: true
     unknown_device_severity: MEDIUM
     storage_device_severity: MEDIUM
+    hid_suspicious_keywords:
+      - rubber
+      - ducky
+      - inject
+      - badusb
+      - keystroke
+    severity_engine:
+      weights:
+        rule: 0.5
+        heuristic: 0.3
+        ml: 0.2
+      score_thresholds:
+        critical: 8.5
+        high: 6.5
+        medium: 4.5
+        low: 2.5
+      rapid_cycle_window_sec: 2.0
+      rapid_cycle_min_events: 3
+      ghost_mount_timeout_sec: 3.0
+      off_hours_start: 22
+      off_hours_end: 6
+      power_draw_high_ma: 500
+      generic_serial_patterns:
+        - "123456"
+        - "12345678"
+        - "000000"
+        - "abcdef"
+        - "generic"
     emit_mount_event: true
     mount_enrich_timeout_sec: 15
     whitelist: []
@@ -53,7 +81,15 @@ monitors:
       - sound
       - drm
       - pci
+    suppress_usb_if_usb_monitor_enabled: true
     alert_on_change: false
+    drm_suspicious_keywords:
+      - hid
+      - keyboard
+      - rubber
+      - ducky
+      - inject
+    drm_allow_unknown_vendor: true
 
   login:
     enabled: true
@@ -70,18 +106,53 @@ monitors:
   network:
     enabled: true
     poll_interval: 5
+    use_netlink: true
     alert_on_new_listener: true
     alert_on_promiscuous: true
     alert_on_new_interface: true
     alert_on_new_connection: true
+    alert_on_default_route_change: true
+    alert_on_arp_change: true
     monitored_ports: []
     baseline_listeners: []
 
   process:
     enabled: true
     poll_interval: 1
+    event_source: auto  # auto|poll|proc_connector|ebpf
+    use_proc_connector: true
+    use_ebpf: false
+    ebpf_strict: false
+    alert_on_shortlived_exec: true
     alert_on_new_process: true
     alert_on_privilege_escalation: true
+    alert_on_deleted_exe: true
+    alert_on_masquerade: true
+    alert_on_suspicious_tree: true
+    management_parent_names:
+      - nginx
+      - apache2
+      - httpd
+      - php-fpm
+      - uwsgi
+      - gunicorn
+    shell_child_names:
+      - sh
+      - bash
+      - zsh
+      - dash
+      - ksh
+    env_keys:
+      - LD_PRELOAD
+      - LD_LIBRARY_PATH
+      - PYTHONPATH
+      - PATH
+      - HOME
+      - USER
+    fork_burst_window_sec: 1.0
+    fork_burst_threshold: 120
+    rare_process_window_sec: 1.0
+    rare_process_threshold: 200
     suspicious_names:
       - nc
       - ncat
@@ -196,3 +267,34 @@ alerts:
   webhook:
     enabled: false
     url: ""
+
+  fuzzy_alert_fingerprints:
+    enabled: true
+    algorithms: [ssdeep, tlsh]
+    compare_previous: true
+    cache_size: 2000
+
+  severity_policy:
+    usb_type_severity:
+      MASS_STORAGE: MEDIUM
+      HID: LOW
+      HID_SUSPICIOUS: HIGH
+      UNKNOWN: MEDIUM
+      TRUSTED: INFO
+    port_subsystem_severity:
+      USB: MEDIUM
+      THUNDERBOLT: CRITICAL
+      THUNDERBOLT_NO_DMA_PROTECTION: CRITICAL
+      THUNDERBOLT_WHILE_LOCKED: CRITICAL
+      PCI: HIGH
+      NET: HIGH
+      BLOCK: MEDIUM
+      DRM: LOW
+      DRM_SUSPICIOUS: MEDIUM
+      SOUND: LOW
+    network_event_severity:
+      NEW_INTERFACE: HIGH
+      PROMISCUOUS_MODE: CRITICAL
+      DEFAULT_ROUTE_CHANGED: HIGH
+      DEFAULT_ROUTE_IMPOSTER: CRITICAL
+      ARP_MAPPING_CHANGED: HIGH

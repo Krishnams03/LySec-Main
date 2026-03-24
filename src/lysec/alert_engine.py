@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 import math
 
+from lysec.fuzzy_hash import compare_fuzzy_hashes, compute_fuzzy_hashes_from_text
+
 try:
     import urllib.request
     HAS_URLLIB = True
@@ -253,6 +255,15 @@ class AlertEngine:
         self._integrity_chain_enabled = bool(integrity_cfg.get("enabled", False))
         self._integrity_prev_hash = str(integrity_cfg.get("seed", ""))
 
+        fuzzy_alert_cfg = self._config.get("fuzzy_alert_fingerprints", {})
+        self._fuzzy_alert_enabled = bool(fuzzy_alert_cfg.get("enabled", True))
+        self._fuzzy_alert_algorithms = [
+            str(x).lower() for x in fuzzy_alert_cfg.get("algorithms", ["ssdeep", "tlsh"])
+        ]
+        self._fuzzy_alert_compare_previous = bool(fuzzy_alert_cfg.get("compare_previous", True))
+        self._fuzzy_alert_cache_size = int(fuzzy_alert_cfg.get("cache_size", 2000))
+        self._fuzzy_alert_cache: dict[str, dict[str, str]] = {}
+
     # ──────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────
@@ -281,6 +292,8 @@ class AlertEngine:
             "details": details or {},
         }
 
+        self._apply_alert_fuzzy_fingerprint(alert)
+
         if self._mitre_enabled:
             self._apply_mitre_enrichment(alert)
 
@@ -301,6 +314,62 @@ class AlertEngine:
         # ── Live anomaly (hybrid ML-style ranking) ──
         if self._ml_enabled and event_type not in ("CORRELATED_INCIDENT", "ML_ANOMALY_INCIDENT"):
             self._maybe_emit_live_anomaly(alert)
+
+    def _apply_alert_fuzzy_fingerprint(self, alert: dict[str, Any]):
+        if not self._fuzzy_alert_enabled:
+            return
+
+        details = alert.get("details")
+        if not isinstance(details, dict):
+            details = {}
+            alert["details"] = details
+
+        canonical_payload = {
+            "monitor": alert.get("monitor", ""),
+            "event_type": alert.get("event_type", ""),
+            "severity": alert.get("severity", ""),
+            "message": alert.get("message", ""),
+            "details": self._stable_fuzzy_details(details),
+        }
+        canonical_str = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"), default=str)
+        fuzzy = compute_fuzzy_hashes_from_text(canonical_str, self._fuzzy_alert_algorithms)
+        if not fuzzy:
+            return
+
+        fuzzy_details: dict[str, Any] = {
+            "hash": fuzzy,
+            "scope": "alert",
+        }
+
+        if self._fuzzy_alert_compare_previous:
+            signature_key = self._fuzzy_alert_signature(canonical_payload)
+            prev = self._fuzzy_alert_cache.get(signature_key)
+            if prev:
+                similarity = compare_fuzzy_hashes(prev, fuzzy)
+                if similarity:
+                    fuzzy_details["similarity_prev"] = similarity
+            self._fuzzy_alert_cache[signature_key] = fuzzy
+            if len(self._fuzzy_alert_cache) > self._fuzzy_alert_cache_size:
+                oldest_key = next(iter(self._fuzzy_alert_cache.keys()), None)
+                if oldest_key is not None:
+                    self._fuzzy_alert_cache.pop(oldest_key, None)
+
+        details["alert_fuzzy"] = fuzzy_details
+
+    @staticmethod
+    def _stable_fuzzy_details(details: dict[str, Any]) -> dict[str, Any]:
+        # Ignore highly-volatile fields to keep comparison meaningful.
+        volatile_keys = {"timestamp", "epoch", "alert_id", "integrity_hash"}
+        stable: dict[str, Any] = {}
+        for key, value in details.items():
+            if str(key).lower() in volatile_keys:
+                continue
+            stable[str(key)] = value
+        return stable
+
+    @staticmethod
+    def _fuzzy_alert_signature(payload: dict[str, Any]) -> str:
+        return "{}|{}".format(payload.get("monitor", ""), payload.get("event_type", ""))
 
     def _apply_mitre_enrichment(self, alert: dict[str, Any]):
         event_type = str(alert.get("event_type", "")).strip().upper()

@@ -38,6 +38,48 @@ kill, or prevent activity.
 | Process | Process table and UID changes | Suspicious binary, privilege escalation |
 | Filesystem | Critical paths via inotify/watchdog | passwd/shadow/ssh/cron tampering |
 
+## External Port Strategy
+
+LySec separates external hardware monitoring into two layers:
+
+1. USB monitor (`usb`): deep USB-specific context and storage/user correlation.
+2. Ports monitor (`ports`): broad hotplug visibility across non-USB subsystems (thunderbolt, drm, pci, net, block, sound).
+
+To avoid duplicate alerts, `ports` suppresses usb-subsystem events by default when the `usb` monitor is enabled.
+
+### New Hardening Signals
+
+1. `THUNDERBOLT_DEVICE_ADDED` now includes DMA/trust context:
+  - `external_dma_protection_enabled`
+  - `kernel_dma_markers`
+  - `iommu_group_count`
+  - `thunderbolt_security_level`
+  - `thunderbolt_authorized`
+  - `thunderbolt_high_risk`
+2. `DISPLAY_CONNECTED` now includes EDID integrity and identity metadata:
+  - `edid_header_valid`
+  - `edid_checksum_valid`
+  - `edid_vendor`
+  - `edid_product_code`
+  - `edid_serial_number`
+  - `edid_suspicious`
+  - `edid_suspicious_reasons`
+3. Network integrity signals now include:
+  - `DEFAULT_ROUTE_CHANGED` (includes `potential_interception`)
+  - `ARP_MAPPING_CHANGED`
+  - Netlink-triggered low-latency route/address/neighbor/link handling when enabled
+
+### Recommended Config Knobs
+
+```yaml
+monitors:
+  ports:
+    suppress_usb_if_usb_monitor_enabled: true
+    drm_allow_unknown_vendor: true
+  network:
+    use_netlink: true
+```
+
 ### Dynamic Handling After Startup
 
 LySec continuously handles runtime changes after the daemon is already running:
@@ -103,6 +145,12 @@ sudo lysec alerts --last 15m
 
 LySec now supports fuzzy hashing for filesystem events so near-similar file versions can be compared.
 
+Global coverage update:
+
+1. Fuzzy fingerprints now apply to all monitor alerts via the alert engine.
+2. Each alert may include `details.alert_fuzzy.hash`.
+3. When enabled, alerts of the same monitor/event type can include `details.alert_fuzzy.similarity_prev` for near-duplicate comparison.
+
 Why this helps:
 
 1. SHA-256 changes fully even for a 1-byte modification.
@@ -117,6 +165,17 @@ monitors:
     fuzzy_hashing:
       enabled: true
       algorithms: [ssdeep, tlsh]
+
+Config (`alerts.fuzzy_alert_fingerprints`):
+
+```yaml
+alerts:
+  fuzzy_alert_fingerprints:
+    enabled: true
+    algorithms: [ssdeep, tlsh]
+    compare_previous: true
+    cache_size: 2000
+```
 ```
 
 Linux dependency note:
@@ -890,8 +949,17 @@ Filesystem events on USB not visible troubleshooting:
 
 Process suspicious command (`nmap`) not visible troubleshooting:
 1. Ensure process monitor is enabled and poll interval is low (`monitors.process.poll_interval: 1`).
-2. Run a command that lasts a few seconds (for example, `nmap -sn 127.0.0.1/24`) so polling can observe it.
-3. Confirm with `sudo lysec alerts --last 10m` and `sudo lysec timeline --start 2026-03-23T00:00:00 --end 2026-03-23T23:59:59 --monitor process`.
+2. Use `monitors.process.event_source: proc_connector` (or `auto`) to improve short-lived process visibility.
+3. Keep `monitors.process.alert_on_shortlived_exec: true` to emit kernel-level short-lived exec/fork hints.
+4. If you explicitly set `event_source: ebpf` without an eBPF adapter, LySec falls back and emits `PROCESS_EVENT_SOURCE_DEGRADED`.
+5. Run a command that lasts a few seconds (for example, `nmap -sn 127.0.0.1/24`) so polling can observe it.
+6. Confirm with `sudo lysec alerts --last 10m` and `sudo lysec timeline --start 2026-03-23T00:00:00 --end 2026-03-23T23:59:59 --monitor process`.
+
+Optional eBPF process source (advanced):
+1. Set `monitors.process.event_source: ebpf` and `monitors.process.use_ebpf: true`.
+2. Install BCC userspace tools/libraries (`python3-bpfcc` package on Debian/Ubuntu family).
+3. Run LySec with privileges required for tracepoint attach.
+4. If attach fails, monitor degrades to `proc_connector` or `poll` based on config and emits a degradation alert.
 
 Quick validation commands:
 

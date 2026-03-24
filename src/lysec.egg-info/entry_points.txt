@@ -1,0 +1,11 @@
+[console_scripts]
+dftool = lysec.cli:main
+dftool-eval = lysec.evaluate:main
+dftool-eval-plot = lysec.plot_eval:main
+dftoold = lysec.daemon:main
+lysec = lysec.cli:main
+lysec-eval = lysec.evaluate:main
+lysec-eval-plot = lysec.plot_eval:main
+lysec-gui = lysec.gui:main
+lysec-watchdog = lysec.watchdog:main
+lysecd = lysec.daemon:main

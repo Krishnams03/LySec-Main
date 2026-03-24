@@ -1,0 +1,29 @@
+Metadata-Version: 2.4
+Name: lysec
+Version: 1.0.0
+Summary: LySec Linux Forensics Monitoring - Detect, Log, Alert (No Prevention)
+Author: LySec Team
+License: MIT
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Information Technology
+Classifier: Topic :: Security
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 3
+Requires-Python: >=3.8
+Requires-Dist: pyudev>=0.24.0
+Requires-Dist: psutil>=5.9.0
+Requires-Dist: watchdog>=3.0.0
+Requires-Dist: python-daemon>=2.3.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: rich>=13.0.0
+Requires-Dist: matplotlib>=3.7.0
+Provides-Extra: fuzzy
+Requires-Dist: ssdeep>=3.4; extra == "fuzzy"
+Requires-Dist: py-tlsh>=4.7.2; extra == "fuzzy"
+Dynamic: author
+Dynamic: classifier
+Dynamic: license
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

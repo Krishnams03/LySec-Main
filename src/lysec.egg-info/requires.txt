@@ -1,0 +1,11 @@
+pyudev>=0.24.0
+psutil>=5.9.0
+watchdog>=3.0.0
+python-daemon>=2.3.0
+pyyaml>=6.0
+rich>=13.0.0
+matplotlib>=3.7.0
+
+[fuzzy]
+ssdeep>=3.4
+py-tlsh>=4.7.2

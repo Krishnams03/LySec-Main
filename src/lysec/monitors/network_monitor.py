@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import socket
+import struct
 from typing import Any
 
 try:
@@ -39,23 +40,53 @@ from lysec.alert_engine import (
 logger = logging.getLogger("lysec.monitor.network")
 
 
+# Netlink constants (linux/rtnetlink.h)
+NLMSG_HDRLEN = 16
+RTM_NEWLINK = 16
+RTM_DELLINK = 17
+RTM_NEWADDR = 20
+RTM_DELADDR = 21
+RTM_NEWROUTE = 24
+RTM_DELROUTE = 25
+RTM_NEWNEIGH = 28
+RTM_DELNEIGH = 29
+
+RTMGRP_LINK = 0x1
+RTMGRP_IPV4_IFADDR = 0x10
+RTMGRP_IPV4_ROUTE = 0x40
+RTMGRP_NEIGH = 0x4
+
+
 class NetworkMonitor(BaseMonitor):
     name = "network"
 
     def __init__(self, config: dict, alert_engine):
         super().__init__(config, alert_engine)
         self._mon_cfg = config.get("monitors", {}).get("network", {})
+        self._global_severity_policy = config.get("alerts", {}).get("severity_policy", {})
+        self._network_event_severity = self._build_network_event_severity_map()
+        self._alert_on_default_route_change = bool(
+            self._mon_cfg.get("alert_on_default_route_change", True)
+        )
+        self._alert_on_arp_change = bool(self._mon_cfg.get("alert_on_arp_change", True))
         self._baseline_listeners: set[str] = set()
         self._known_interfaces: set[str] = set()
+        self._last_new_interfaces: set[str] = set()
         self._known_connections: set[str] = set()
         self._connection_details: dict[str, dict[str, Any]] = {}
+        self._default_route: dict[str, Any] = {}
+        self._arp_table: dict[str, str] = {}
         self._promisc_cache: set[str] = set()
+        self._netlink_enabled = bool(self._mon_cfg.get("use_netlink", True))
+        self._netlink_sock: socket.socket | None = None
         self._first_run = True
 
     def setup(self):
         if not HAS_PSUTIL:
             logger.warning("psutil not installed — network monitoring limited")
         self._snapshot()
+        if self._netlink_enabled:
+            self._setup_netlink()
         logger.info(
             "Network monitor initialised — %d listeners, %d interfaces",
             len(self._baseline_listeners),
@@ -63,10 +94,25 @@ class NetworkMonitor(BaseMonitor):
         )
 
     def poll(self):
+        netlink_events = self._drain_netlink_events() if self._netlink_sock else set()
+
         self._check_listeners()
-        self._check_interfaces()
+        if (not netlink_events) or ({"link", "addr"} & netlink_events):
+            self._check_interfaces()
         self._check_promiscuous()
         self._check_connections()
+        if self._alert_on_default_route_change and ((not netlink_events) or ("route" in netlink_events)):
+            self._check_default_route()
+        if self._alert_on_arp_change and ((not netlink_events) or ("neigh" in netlink_events)):
+            self._check_arp_integrity()
+
+    def teardown(self):
+        if self._netlink_sock:
+            try:
+                self._netlink_sock.close()
+            except OSError:
+                pass
+            self._netlink_sock = None
 
     # ──────────────────────── Listeners ──────────────────────────────────
     def _check_listeners(self):
@@ -119,6 +165,7 @@ class NetworkMonitor(BaseMonitor):
         current = self._get_interfaces()
         new_ifaces = current - self._known_interfaces
         removed_ifaces = self._known_interfaces - current
+        self._last_new_interfaces = set(new_ifaces)
 
         for iface in new_ifaces:
             logger.warning("NEW_INTERFACE: %s", iface)
@@ -127,7 +174,7 @@ class NetworkMonitor(BaseMonitor):
                     monitor="network",
                     event_type="NEW_INTERFACE",
                     message=f"New network interface detected: {iface}",
-                    severity=SEVERITY_HIGH,
+                    severity=self._network_event_severity.get("NEW_INTERFACE", SEVERITY_HIGH),
                     details={"interface": iface},
                 )
 
@@ -143,6 +190,112 @@ class NetworkMonitor(BaseMonitor):
 
         self._known_interfaces = current
 
+    def _setup_netlink(self):
+        """Subscribe to kernel routing notifications for low-latency topology updates."""
+        try:
+            sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, socket.NETLINK_ROUTE)
+            groups = RTMGRP_LINK | RTMGRP_IPV4_IFADDR | RTMGRP_IPV4_ROUTE | RTMGRP_NEIGH
+            sock.bind((0, groups))
+            sock.setblocking(False)
+            self._netlink_sock = sock
+            logger.info("Network monitor netlink subscription enabled")
+        except OSError as exc:
+            self._netlink_sock = None
+            logger.warning("Netlink subscription unavailable, using polling fallback: %s", exc)
+
+    def _drain_netlink_events(self) -> set[str]:
+        """Drain pending netlink messages and classify by event family."""
+        if not self._netlink_sock:
+            return set()
+
+        events: set[str] = set()
+        while True:
+            try:
+                payload = self._netlink_sock.recv(65535)
+            except BlockingIOError:
+                break
+            except OSError:
+                break
+
+            offset = 0
+            plen = len(payload)
+            while offset + NLMSG_HDRLEN <= plen:
+                hdr = payload[offset : offset + NLMSG_HDRLEN]
+                msg_len, msg_type, _, _, _ = struct.unpack("IHHII", hdr)
+                if msg_len < NLMSG_HDRLEN:
+                    break
+
+                if msg_type in (RTM_NEWROUTE, RTM_DELROUTE):
+                    events.add("route")
+                elif msg_type in (RTM_NEWNEIGH, RTM_DELNEIGH):
+                    events.add("neigh")
+                elif msg_type in (RTM_NEWADDR, RTM_DELADDR):
+                    events.add("addr")
+                elif msg_type in (RTM_NEWLINK, RTM_DELLINK):
+                    events.add("link")
+
+                # Netlink messages are 4-byte aligned.
+                offset += (msg_len + 3) & ~3
+
+        return events
+
+    def _check_default_route(self):
+        route = self._get_default_route()
+        if not route:
+            return
+
+        if not self._default_route:
+            self._default_route = route
+            return
+
+        if route == self._default_route:
+            return
+
+        potential_interception = route.get("iface") in self._last_new_interfaces
+        severity = self._network_event_severity.get("DEFAULT_ROUTE_CHANGED", SEVERITY_HIGH)
+        if potential_interception:
+            severity = self._network_event_severity.get("DEFAULT_ROUTE_IMPOSTER", severity)
+
+        self._alert.fire(
+            monitor="network",
+            event_type="DEFAULT_ROUTE_CHANGED",
+            message="Default route changed on host",
+            severity=severity,
+            details={
+                "old_default_route": self._default_route,
+                "new_default_route": route,
+                "potential_interception": potential_interception,
+            },
+        )
+        self._default_route = route
+
+    def _check_arp_integrity(self):
+        table = self._read_arp_table()
+        if not table:
+            return
+
+        if not self._arp_table:
+            self._arp_table = table
+            return
+
+        for ip, mac in table.items():
+            old_mac = self._arp_table.get(ip)
+            if not old_mac or old_mac == mac:
+                continue
+            self._alert.fire(
+                monitor="network",
+                event_type="ARP_MAPPING_CHANGED",
+                message=f"ARP mapping changed for {ip}: {old_mac} -> {mac}",
+                severity=self._network_event_severity.get("ARP_MAPPING_CHANGED", SEVERITY_HIGH),
+                details={
+                    "ip": ip,
+                    "old_mac": old_mac,
+                    "new_mac": mac,
+                },
+            )
+
+        self._arp_table = table
+
     @staticmethod
     def _get_interfaces() -> set[str]:
         if HAS_PSUTIL:
@@ -151,6 +304,91 @@ class NetworkMonitor(BaseMonitor):
             return set(os.listdir("/sys/class/net"))
         except Exception:
             return set()
+
+    @staticmethod
+    def _hex_to_ipv4(hex_addr: str) -> str:
+        try:
+            raw = bytes.fromhex(hex_addr)
+            return socket.inet_ntoa(raw[::-1])
+        except Exception:
+            return ""
+
+    def _get_default_route(self) -> dict[str, Any]:
+        route_file = "/proc/net/route"
+        if not os.path.isfile(route_file):
+            return {}
+
+        try:
+            with open(route_file, "r", encoding="utf-8", errors="replace") as fh:
+                next(fh, None)
+                for line in fh:
+                    parts = line.strip().split()
+                    if len(parts) < 8:
+                        continue
+                    iface, destination, gateway, flags, _, _, metric, mask = parts[:8]
+                    if destination != "00000000":
+                        continue
+                    if mask not in ("00000000", "0"):
+                        continue
+                    gw_ip = self._hex_to_ipv4(gateway)
+                    return {
+                        "iface": iface,
+                        "gateway": gw_ip,
+                        "metric": int(metric),
+                        "flags": flags,
+                    }
+        except Exception:
+            return {}
+        return {}
+
+    @staticmethod
+    def _read_arp_table() -> dict[str, str]:
+        arp_file = "/proc/net/arp"
+        if not os.path.isfile(arp_file):
+            return {}
+
+        out: dict[str, str] = {}
+        try:
+            with open(arp_file, "r", encoding="utf-8", errors="replace") as fh:
+                next(fh, None)
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) < 4:
+                        continue
+                    ip = parts[0]
+                    mac = parts[3].lower()
+                    if not ip or mac in ("00:00:00:00:00:00", "incomplete"):
+                        continue
+                    out[ip] = mac
+        except Exception:
+            return {}
+        return out
+
+    @staticmethod
+    def _parse_severity(value: str, fallback: str) -> str:
+        sev = str(value or "").upper().strip()
+        mapping = {
+            "CRITICAL": SEVERITY_CRITICAL,
+            "HIGH": SEVERITY_HIGH,
+            "MEDIUM": SEVERITY_MEDIUM,
+            "LOW": SEVERITY_LOW,
+            "INFO": SEVERITY_INFO,
+        }
+        return mapping.get(sev, fallback)
+
+    def _build_network_event_severity_map(self) -> dict[str, str]:
+        base = {
+            "NEW_INTERFACE": SEVERITY_HIGH,
+            "PROMISCUOUS_MODE": SEVERITY_CRITICAL,
+            "DEFAULT_ROUTE_CHANGED": SEVERITY_HIGH,
+            "DEFAULT_ROUTE_IMPOSTER": SEVERITY_CRITICAL,
+            "ARP_MAPPING_CHANGED": SEVERITY_HIGH,
+        }
+        cfg = self._global_severity_policy.get("network_event_severity", {})
+        for key, value in cfg.items():
+            map_key = str(key).strip().upper()
+            base[map_key] = self._parse_severity(value, fallback=base.get(map_key, SEVERITY_MEDIUM))
+        return base
 
     # ──────────────────────── Promiscuous mode ──────────────────────────
     def _check_promiscuous(self):
@@ -254,4 +492,6 @@ class NetworkMonitor(BaseMonitor):
         self._known_interfaces = self._get_interfaces()
         listeners = self._get_listeners()
         self._baseline_listeners = {self._listener_key(c) for c in listeners}
+        self._default_route = self._get_default_route()
+        self._arp_table = self._read_arp_table()
 

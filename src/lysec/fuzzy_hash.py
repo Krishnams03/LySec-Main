@@ -5,6 +5,7 @@ Optional ssdeep / TLSH hashing for near-similarity comparisons.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,57 @@ def compute_fuzzy_hashes(file_path: str, algorithms: list[str] | None = None) ->
             pass
 
     return result
+
+
+def compute_fuzzy_hashes_from_bytes(
+    data: bytes,
+    algorithms: list[str] | None = None,
+) -> dict[str, str]:
+    """Compute fuzzy hashes for in-memory bytes payload."""
+    if not data:
+        return {}
+
+    algorithms = [a.lower() for a in (algorithms or ["ssdeep", "tlsh"])]
+    result: dict[str, str] = {}
+
+    if "ssdeep" in algorithms and HAS_SSDEEP:
+        # ssdeep Python binding commonly exposes file-based API only.
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(data)
+                tmp.flush()
+                tmp_path = tmp.name
+            digest = ssdeep.hash_from_file(tmp_path)
+            if digest:
+                result["ssdeep"] = str(digest)
+        except Exception:
+            pass
+        finally:
+            if tmp_path:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    if "tlsh" in algorithms and HAS_TLSH:
+        try:
+            if len(data) >= 50:
+                digest = tlsh.hash(data)
+                if digest and digest != "TNULL":
+                    result["tlsh"] = str(digest)
+        except Exception:
+            pass
+
+    return result
+
+
+def compute_fuzzy_hashes_from_text(
+    text: str,
+    algorithms: list[str] | None = None,
+) -> dict[str, str]:
+    """Compute fuzzy hashes for text payload."""
+    return compute_fuzzy_hashes_from_bytes(text.encode("utf-8", errors="replace"), algorithms)
 
 
 def compare_fuzzy_hashes(
