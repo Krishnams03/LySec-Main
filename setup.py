@@ -22,9 +22,13 @@ setup(
         "pyyaml>=6.0",
         "rich>=13.0.0",
         "matplotlib>=3.7.0",
-        "ssdeep>=3.4",
-        "py-tlsh>=4.7.2",
     ],
+    extras_require={
+        "fuzzy": [
+            "ssdeep>=3.4",
+            "py-tlsh>=4.7.2",
+        ],
+    },
     entry_points={
         "console_scripts": [
             "lysec=lysec.cli:main",

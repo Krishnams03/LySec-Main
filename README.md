@@ -331,6 +331,25 @@ sudo apt install -y python3-venv
 sudo ./install.sh
 ```
 
+### If install fails on ssdeep (Python 3.13 / pkg_resources error)
+
+Some hosts fail to build `ssdeep` from source with errors like `ModuleNotFoundError: pkg_resources`.
+LySec now treats fuzzy-hash backends as optional, so installation should continue even if
+`ssdeep`/`py-tlsh` cannot be compiled.
+
+What this means:
+
+1. Core monitoring and alerts still work normally.
+2. Fuzzy hash fields (`fuzzy_hash`, `fuzzy_similarity`) may be absent until optional libs are installed.
+
+Optional manual retry (after demo if needed):
+
+```bash
+source /opt/lysec/.venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install ssdeep py-tlsh
+```
+
 ## Quick Start
 
 ```bash

@@ -79,13 +79,22 @@ create_venv() {
     VENV_PY="$VENV_DIR/bin/python"
     VENV_PIP="$VENV_DIR/bin/pip"
 
-    "$VENV_PIP" install --upgrade pip >/dev/null 2>&1 || true
+    "$VENV_PIP" install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
     success "Virtual environment ready"
 }
 
 install_dependencies() {
     info "Installing Python dependencies …"
     "$VENV_PIP" install -r requirements.txt || error "Failed to install dependencies"
+
+    # Optional native fuzzy-hash libraries. Do not fail full install if unavailable.
+    if "$VENV_PIP" install ssdeep py-tlsh >/dev/null 2>&1; then
+        success "Optional fuzzy-hash dependencies installed (ssdeep, py-tlsh)"
+    else
+        warn "Optional fuzzy-hash dependencies could not be built (ssdeep/py-tlsh)."
+        warn "LySec will continue without fuzzy hash fields on this host."
+    fi
+
     success "Dependencies installed"
 }
 
