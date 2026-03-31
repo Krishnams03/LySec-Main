@@ -108,6 +108,26 @@ class ProcessMonitorTests(unittest.TestCase):
         event_types = [e.get("event_type") for e in alert.events]
         self.assertIn("PROCESS_SHORTLIVED_EVENT", event_types)
 
+    def test_login_service_restart_burst_alert(self):
+        alert = _DummyAlert()
+        cfg = {
+            "monitors": {
+                "process": {
+                    "alert_on_login_service_restarts": True,
+                    "login_service_restart_threshold": 2,
+                    "login_service_restart_window_sec": 60,
+                    "login_service_names": ["gdm"],
+                }
+            }
+        }
+        mon = ProcessMonitor(cfg, alert)
+        base = {"pid": 100, "name": "gdm"}
+        mon._check_login_service_restarts("gdm", "/usr/sbin/gdm", "gdm", base)
+        mon._check_login_service_restarts("gdm", "/usr/sbin/gdm", "gdm", base)
+
+        event_types = [e.get("event_type") for e in alert.events]
+        self.assertIn("LOGIN_SERVICE_RESTART_BURST", event_types)
+
 
 if __name__ == "__main__":
     unittest.main()

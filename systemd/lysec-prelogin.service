@@ -1,0 +1,29 @@
+[Unit]
+Description=LySec - Linux Forensics Monitoring Daemon (Pre-Login)
+Documentation=https://github.com/yourname/lysec
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Wants=systemd-udevd.service
+Before=basic.target
+
+[Service]
+Type=forking
+PIDFile=/var/run/lysec/lysecd.pid
+ExecStart=/usr/local/bin/lysecd start
+ExecStop=/usr/local/bin/lysecd stop
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3
+OOMScoreAdjust=-1000
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lysec-prelogin
+
+ProtectSystem=strict
+ReadWritePaths=/var/log/lysec /var/lib/lysec /var/run/lysec
+ProtectHome=read-only
+NoNewPrivileges=false
+PrivateTmp=false
+
+[Install]
+WantedBy=basic.target

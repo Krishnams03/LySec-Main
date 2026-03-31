@@ -153,9 +153,21 @@ install_config() {
 install_systemd() {
     info "Installing systemd service …"
     cp systemd/lysec.service "$SYSTEMD_DIR/lysec.service"
+    cp systemd/lysec-prelogin.service "$SYSTEMD_DIR/lysec-prelogin.service"
     cp systemd/lysec-watchdog.service "$SYSTEMD_DIR/lysec-watchdog.service"
     systemctl daemon-reload
-    systemctl enable lysec.service
+
+    BOOT_PROFILE="${LYSEC_BOOT_PROFILE:-prelogin}"
+    if [[ "$BOOT_PROFILE" == "prelogin" ]]; then
+        systemctl disable lysec.service >/dev/null 2>&1 || true
+        systemctl enable lysec-prelogin.service
+        info "Boot profile: prelogin (enabled lysec-prelogin.service)"
+    else
+        systemctl disable lysec-prelogin.service >/dev/null 2>&1 || true
+        systemctl enable lysec.service
+        info "Boot profile: standard (enabled lysec.service)"
+    fi
+
     systemctl enable lysec-watchdog.service
     success "Systemd service installed and enabled"
 }

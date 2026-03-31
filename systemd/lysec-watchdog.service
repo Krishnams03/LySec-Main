@@ -1,8 +1,7 @@
 [Unit]
 Description=LySec - Watchdog Daemon
 Documentation=https://github.com/yourname/lysec
-After=local-fs.target lysec.service
-Wants=lysec.service
+After=local-fs.target lysec-prelogin.service lysec.service
 
 [Service]
 Type=forking

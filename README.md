@@ -961,6 +961,36 @@ Optional eBPF process source (advanced):
 3. Run LySec with privileges required for tracepoint attach.
 4. If attach fails, monitor degrades to `proc_connector` or `poll` based on config and emits a degradation alert.
 
+Pre-login startup profile (capture before desktop/login):
+1. Install includes `lysec-prelogin.service` in `/etc/systemd/system`.
+2. Installer defaults to pre-login profile (`LYSEC_BOOT_PROFILE=prelogin`).
+3. For standard profile install, run installer with:
+  `LYSEC_BOOT_PROFILE=standard sudo ./install.sh`
+4. Reboot and verify order:
+  `systemctl status lysec-prelogin.service`
+
+USB boot-time visibility:
+1. `monitors.usb.emit_startup_inventory: true` emits `USB_DEVICE_PRESENT_AT_START` for devices already connected when daemon starts.
+2. This complements attach/remove events and helps when device insertion happened before monitor polling began.
+
+Login monitor startup backfill:
+1. `monitors.login.startup_backfill_enabled` enables reading recent auth records at daemon startup.
+2. `monitors.login.startup_backfill_lines` controls text log tail depth.
+3. `monitors.login.startup_backfill_records` controls binary (`wtmp`/`btmp`) tail depth.
+
+Login-service restart anomaly signal:
+1. Process monitor emits `LOGIN_SERVICE_RESTART_BURST` when display manager/getty style services restart repeatedly in a short window.
+2. Tune with:
+  - `monitors.process.alert_on_login_service_restarts`
+  - `monitors.process.login_service_restart_window_sec`
+  - `monitors.process.login_service_restart_threshold`
+  - `monitors.process.login_service_names`
+
+Daemon startup stage evidence:
+1. `DAEMON_START` now includes `details.startup_context`.
+2. This captures best-effort boot context such as uptime, default target, and display-manager unit state at start.
+3. Use it to verify whether LySec started before or after login stack readiness.
+
 Quick validation commands:
 
 ```bash

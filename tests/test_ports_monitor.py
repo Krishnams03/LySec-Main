@@ -6,8 +6,11 @@ from lysec.monitors.usb_monitor import USBMonitor
 
 
 class _DummyAlert:
+    def __init__(self):
+        self.events = []
+
     def fire(self, **kwargs):
-        return None
+        self.events.append(kwargs)
 
 
 def _encode_vendor_id(vendor: str) -> int:
@@ -150,6 +153,46 @@ class PortsMonitorTests(unittest.TestCase):
         )
         self.assertIn(severity, {"HIGH", "CRITICAL"})
         self.assertIn("unsigned_or_generic_serial", engine["rule_matches"])
+
+    def test_usb_startup_inventory_emits_event(self):
+        alert = _DummyAlert()
+        cfg = {
+            "monitors": {
+                "usb": {
+                    "emit_startup_inventory": True,
+                    "startup_inventory_severity": "INFO",
+                }
+            },
+            "alerts": {},
+        }
+        mon = USBMonitor(cfg, alert)
+
+        class _FakeDevice:
+            def __init__(self):
+                self.sys_path = "/sys/bus/usb/devices/1-1"
+
+            def get(self, key, default=""):
+                data = {
+                    "ID_VENDOR_ID": "abcd",
+                    "ID_MODEL_ID": "1234",
+                    "ID_VENDOR": "DemoVendor",
+                    "ID_MODEL": "DemoKeyboard",
+                    "ID_SERIAL_SHORT": "SER12345",
+                    "bDeviceClass": "03",
+                }
+                return data.get(key, default)
+
+        class _FakeContext:
+            def list_devices(self, subsystem=None, DEVTYPE=None):
+                if subsystem == "usb" and DEVTYPE == "usb_device":
+                    return [_FakeDevice()]
+                return []
+
+        mon._context = _FakeContext()
+        mon._snapshot_devices()
+
+        event_types = [e.get("event_type") for e in alert.events]
+        self.assertIn("USB_DEVICE_PRESENT_AT_START", event_types)
 
 
 if __name__ == "__main__":

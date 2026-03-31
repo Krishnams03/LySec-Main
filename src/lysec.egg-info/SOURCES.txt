@@ -27,6 +27,9 @@ src/lysec/monitors/process_ebpf.py
 src/lysec/monitors/process_monitor.py
 src/lysec/monitors/usb_monitor.py
 tests/test_alert_engine_fuzzy.py
+tests/test_daemon_startup_context.py
+tests/test_filesystem_monitor.py
+tests/test_login_monitor.py
 tests/test_network_monitor.py
 tests/test_ports_monitor.py
 tests/test_process_monitor.py
