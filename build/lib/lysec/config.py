@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
             "heartbeat_timeout_sec": 8,
             "restart_cooldown_sec": 20,
             "service_name": "lysec.service",
+            "service_fallbacks": [],
         },
     },
     "logging": {

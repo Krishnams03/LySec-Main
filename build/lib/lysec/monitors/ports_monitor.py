@@ -138,7 +138,7 @@ class PortsMonitor(BaseMonitor):
         except Exception:
             props = {}
 
-        return {
+        info = {
             "action": action,
             "subsystem": getattr(device, "subsystem", None) or props.get("SUBSYSTEM", ""),
             "devtype": getattr(device, "device_type", None) or props.get("DEVTYPE", ""),
@@ -150,8 +150,75 @@ class PortsMonitor(BaseMonitor):
             "vendor": props.get("ID_VENDOR_FROM_DATABASE", props.get("ID_VENDOR", "")),
             "model": props.get("ID_MODEL_FROM_DATABASE", props.get("ID_MODEL", "")),
             "serial": props.get("ID_SERIAL_SHORT", ""),
+            "serial_full": props.get("ID_SERIAL", ""),
+            "manufacturer": props.get("ID_VENDOR", ""),
+            "product": props.get("ID_MODEL", ""),
+            "bus_num": props.get("BUSNUM", ""),
+            "dev_num": props.get("DEVNUM", ""),
+            "device_class": props.get("bDeviceClass", ""),
+            "usb_interfaces_raw": props.get("ID_USB_INTERFACES", ""),
+            "id_bus": props.get("ID_BUS", ""),
+            "path_tag": props.get("ID_PATH_TAG", ""),
+            "revision": props.get("ID_REVISION", ""),
             "interface": props.get("INTERFACE", ""),
         }
+        if str(info.get("subsystem", "")).strip().lower() == "usb":
+            self._enrich_usb_port_context(info)
+        return info
+
+    @staticmethod
+    def _read_sysfs_attr(path: str, name: str) -> str:
+        fp = os.path.join(path, name)
+        try:
+            with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read().strip()
+        except Exception:
+            return ""
+
+    def _extract_sysfs_info(self, subsystem: str, entry: str, action: str) -> dict[str, Any]:
+        info: dict[str, Any] = {
+            "action": action,
+            "subsystem": subsystem,
+            "sys_path": entry,
+        }
+
+        if subsystem == "usb":
+            info.update(
+                {
+                    "vendor_id": self._read_sysfs_attr(entry, "idVendor"),
+                    "product_id": self._read_sysfs_attr(entry, "idProduct"),
+                    "serial": self._read_sysfs_attr(entry, "serial"),
+                    "serial_full": self._read_sysfs_attr(entry, "serial"),
+                    "manufacturer": self._read_sysfs_attr(entry, "manufacturer"),
+                    "vendor": self._read_sysfs_attr(entry, "manufacturer"),
+                    "product": self._read_sysfs_attr(entry, "product"),
+                    "model": self._read_sysfs_attr(entry, "product"),
+                    "bus_num": self._read_sysfs_attr(entry, "busnum"),
+                    "dev_num": self._read_sysfs_attr(entry, "devnum"),
+                    "device_class": self._read_sysfs_attr(entry, "bDeviceClass"),
+                    "revision": self._read_sysfs_attr(entry, "bcdDevice"),
+                }
+            )
+            self._enrich_usb_port_context(info)
+
+        return info
+
+    @staticmethod
+    def _build_usb_uid(info: dict[str, Any]) -> str:
+        serial = str(info.get("serial", "")).strip() or str(info.get("serial_full", "")).strip()
+        path_hint = str(info.get("path_tag", "")).strip() or str(info.get("sys_path", "")).strip()
+        serial_or_path = serial or path_hint
+        return f"{info.get('vendor_id', '')}:{info.get('product_id', '')}:{serial_or_path}"
+
+    def _enrich_usb_port_context(self, info: dict[str, Any]):
+        info["uid"] = self._build_usb_uid(info)
+        bus = str(info.get("bus_num", "")).zfill(3) if str(info.get("bus_num", "")).strip() else ""
+        dev = str(info.get("dev_num", "")).zfill(3) if str(info.get("dev_num", "")).strip() else ""
+        vid = str(info.get("vendor_id", "")).strip()
+        pid = str(info.get("product_id", "")).strip()
+        name = str(info.get("model", "")).strip() or str(info.get("product", "")).strip()
+        if bus and dev and (vid or pid):
+            info["lsusb_like"] = f"Bus {bus} Device {dev}: ID {vid}:{pid} {name}".strip()
 
     def _emit_add(self, info: dict):
         subsystem = info.get("subsystem", "unknown")
@@ -531,22 +598,10 @@ class PortsMonitor(BaseMonitor):
             curr = self._list_sysfs_entries(subsystem)
 
             for entry in curr - prev:
-                self._emit_add(
-                    {
-                        "action": "add",
-                        "subsystem": subsystem,
-                        "sys_path": entry,
-                    }
-                )
+                self._emit_add(self._extract_sysfs_info(subsystem, entry, "add"))
 
             for entry in prev - curr:
-                self._emit_remove(
-                    {
-                        "action": "remove",
-                        "subsystem": subsystem,
-                        "sys_path": entry,
-                    }
-                )
+                self._emit_remove(self._extract_sysfs_info(subsystem, entry, "remove"))
 
             self._sysfs_snapshot[subsystem] = curr
 

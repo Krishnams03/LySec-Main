@@ -963,9 +963,9 @@ Optional eBPF process source (advanced):
 
 Pre-login startup profile (capture before desktop/login):
 1. Install includes `lysec-prelogin.service` in `/etc/systemd/system`.
-2. Installer defaults to pre-login profile (`LYSEC_BOOT_PROFILE=prelogin`).
-3. For standard profile install, run installer with:
-  `LYSEC_BOOT_PROFILE=standard sudo ./install.sh`
+2. Installer defaults to standard profile (`LYSEC_BOOT_PROFILE=standard`).
+3. For pre-login profile install, run installer with:
+  `LYSEC_BOOT_PROFILE=prelogin sudo ./install.sh`
 4. Reboot and verify order:
   `systemctl status lysec-prelogin.service`
 

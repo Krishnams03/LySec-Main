@@ -82,6 +82,47 @@ class PortsMonitorTests(unittest.TestCase):
         mon = self._monitor(ports_cfg={"suppress_usb_if_usb_monitor_enabled": False}, usb_enabled=True)
         self.assertFalse(mon._should_skip_subsystem("usb"))
 
+    def test_ports_usb_udev_info_contains_lsusb_like_fields(self):
+        mon = self._monitor()
+
+        class _FakeDevice:
+            subsystem = "usb"
+            device_type = "usb_device"
+            sys_path = "/sys/bus/usb/devices/1-3"
+            device_node = "/dev/bus/usb/001/002"
+            properties = {
+                "ID_VENDOR_ID": "8564",
+                "ID_MODEL_ID": "1000",
+                "ID_VENDOR": "Transcend",
+                "ID_MODEL": "JetFlash",
+                "ID_SERIAL_SHORT": "ABC123",
+                "BUSNUM": "1",
+                "DEVNUM": "2",
+            }
+
+        info = mon._extract_udev_info(_FakeDevice(), "add")
+        self.assertEqual(info["uid"], "8564:1000:ABC123")
+        self.assertEqual(info["bus_num"], "1")
+        self.assertEqual(info["dev_num"], "2")
+        self.assertEqual(
+            info["lsusb_like"],
+            "Bus 001 Device 002: ID 8564:1000 JetFlash",
+        )
+
+    def test_ports_builds_uid_from_path_when_serial_missing(self):
+        mon = self._monitor()
+        uid = mon._build_usb_uid(
+            {
+                "vendor_id": "8564",
+                "product_id": "1000",
+                "serial": "",
+                "serial_full": "",
+                "path_tag": "",
+                "sys_path": "/sys/bus/usb/devices/1-3",
+            }
+        )
+        self.assertEqual(uid, "8564:1000:/sys/bus/usb/devices/1-3")
+
     def test_usb_benign_hid_is_not_high_or_critical(self):
         cfg = {
             "monitors": {"usb": {}},
@@ -193,6 +234,102 @@ class PortsMonitorTests(unittest.TestCase):
 
         event_types = [e.get("event_type") for e in alert.events]
         self.assertIn("USB_DEVICE_PRESENT_AT_START", event_types)
+
+    def test_usb_duplicate_attach_events_suppressed_within_window(self):
+        alert = _DummyAlert()
+        cfg = {
+            "monitors": {
+                "usb": {
+                    "alert_on_new_device": True,
+                    "event_dedup_window_sec": 30,
+                }
+            },
+            "alerts": {},
+        }
+        mon = USBMonitor(cfg, alert)
+        info = {
+            "sys_path": "/sys/bus/usb/devices/1-2",
+            "vendor_id": "1d6b",
+            "product_id": "0002",
+            "serial": "SERIAL-XYZ",
+            "uid": "1d6b:0002:SERIAL-XYZ",
+            "model": "Demo USB",
+            "usb_type": "hid",
+        }
+
+        mon._on_device_added(dict(info))
+        mon._on_device_added(dict(info))
+
+        attached_events = [
+            e for e in alert.events if e.get("event_type") == "USB_DEVICE_ATTACHED"
+        ]
+        self.assertEqual(len(attached_events), 1)
+
+    def test_extract_udev_info_contains_uid_and_model_fields(self):
+        mon = USBMonitor({"monitors": {"usb": {}}}, _DummyAlert())
+
+        class _FakeDevice:
+            sys_path = "/sys/bus/usb/devices/2-1"
+
+            def get(self, key, default=""):
+                data = {
+                    "ID_VENDOR_ID": "abcd",
+                    "ID_MODEL_ID": "1234",
+                    "ID_VENDOR": "Acme",
+                    "ID_MODEL": "RoadRunner",
+                    "ID_SERIAL_SHORT": "SER42",
+                    "ID_PATH_TAG": "pci-0000_00_14_0-usb-0_1",
+                    "bDeviceClass": "08",
+                }
+                return data.get(key, default)
+
+        info = mon._extract_udev_info(_FakeDevice())
+        self.assertEqual(info["uid"], "abcd:1234:SER42")
+        self.assertEqual(info["model"], "RoadRunner")
+        self.assertEqual(info["manufacturer"], "Acme")
+
+    def test_extract_udev_info_uses_interface_class_when_device_class_generic(self):
+        mon = USBMonitor({"monitors": {"usb": {}}}, _DummyAlert())
+
+        class _FakeDevice:
+            sys_path = "/sys/bus/usb/devices/2-2"
+
+            def get(self, key, default=""):
+                data = {
+                    "ID_VENDOR_ID": "8564",
+                    "ID_MODEL_ID": "1000",
+                    "ID_VENDOR": "Transcend",
+                    "ID_MODEL": "JetFlash",
+                    "ID_SERIAL_SHORT": "SFRSWC7Q",
+                    "ID_USB_INTERFACES": ":080650:",
+                    "bDeviceClass": "00",
+                }
+                return data.get(key, default)
+
+        info = mon._extract_udev_info(_FakeDevice())
+        self.assertEqual(info["usb_type"], "mass_storage")
+
+    def test_attach_message_contains_vendor_and_bus_dev(self):
+        alert = _DummyAlert()
+        mon = USBMonitor({"monitors": {"usb": {"alert_on_new_device": True}}}, alert)
+        mon._on_device_added(
+            {
+                "sys_path": "/sys/bus/usb/devices/1-3",
+                "vendor_id": "8564",
+                "product_id": "1000",
+                "vendor": "Transcend",
+                "model": "JetFlash",
+                "serial": "SFRSWC7Q",
+                "bus_num": "1",
+                "dev_num": "2",
+                "uid": "8564:1000:SFRSWC7Q",
+                "usb_type": "mass_storage",
+            }
+        )
+        self.assertTrue(alert.events)
+        msg = alert.events[-1].get("message", "")
+        self.assertIn("Transcend JetFlash", msg)
+        self.assertIn("bus=001,dev=002", msg)
 
 
 if __name__ == "__main__":

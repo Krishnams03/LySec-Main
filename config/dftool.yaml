@@ -31,6 +31,7 @@ monitors:
   usb:
     enabled: true
     poll_interval: 1            # seconds
+    event_dedup_window_sec: 2.0 # suppress duplicate attach/remove events in this window
     alert_on_new_device: true
     whitelist: []               # known vendor:product pairs, e.g. ["8087:0024"]
 

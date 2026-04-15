@@ -5,9 +5,8 @@ After=local-fs.target systemd-udevd.service
 Wants=systemd-udevd.service
 
 [Service]
-Type=forking
-PIDFile=/var/run/lysec/lysecd.pid
-ExecStart=/usr/local/bin/lysecd start
+Type=simple
+ExecStart=/usr/local/bin/lysecd start --foreground
 ExecStop=/usr/local/bin/lysecd stop
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

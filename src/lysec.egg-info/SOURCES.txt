@@ -33,3 +33,4 @@ tests/test_login_monitor.py
 tests/test_network_monitor.py
 tests/test_ports_monitor.py
 tests/test_process_monitor.py
+tests/test_watchdog_service_target.py

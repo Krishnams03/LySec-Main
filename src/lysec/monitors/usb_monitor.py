@@ -85,6 +85,7 @@ class USBMonitor(BaseMonitor):
         }
         self._known_devices: dict[str, dict] = {}  # sys_path -> info
         self._recent_device_actions: dict[str, list[tuple[float, str]]] = {}
+        self._recent_event_emissions: dict[str, float] = {}
         self._seen_device_signatures: set[str] = set()
         self._port_type_history: dict[str, set[str]] = {}
         self._udev_monitor = None
@@ -125,6 +126,7 @@ class USBMonitor(BaseMonitor):
         self._off_hours_start = int(self._severity_engine_cfg.get("off_hours_start", 22))
         self._off_hours_end = int(self._severity_engine_cfg.get("off_hours_end", 6))
         self._power_draw_high_ma = int(self._severity_engine_cfg.get("power_draw_high_ma", 500))
+        self._event_dedup_window_sec = float(self._mon_cfg.get("event_dedup_window_sec", 2.0))
 
     # ── Setup ──
     def setup(self):
@@ -177,20 +179,41 @@ class USBMonitor(BaseMonitor):
         self._prev_device_paths = current_paths
 
     def _extract_udev_info(self, device) -> dict:
+        vendor_id = device.get("ID_VENDOR_ID", "")
+        product_id = device.get("ID_MODEL_ID", "")
+        serial_short = device.get("ID_SERIAL_SHORT", "")
+        serial_full = device.get("ID_SERIAL", "")
+        path_tag = device.get("ID_PATH_TAG", "")
+        uid = self._build_device_uid(
+            vendor_id=vendor_id,
+            product_id=product_id,
+            serial=serial_short or serial_full,
+            path_hint=path_tag or device.sys_path,
+        )
+        interfaces = self._parse_interface_classes(device.get("ID_USB_INTERFACES", ""))
+        usb_type = self._resolve_usb_type(device.get("bDeviceClass", ""), interfaces)
+
         return {
             "sys_path": device.sys_path,
-            "vendor_id": device.get("ID_VENDOR_ID", ""),
-            "product_id": device.get("ID_MODEL_ID", ""),
+            "vendor_id": vendor_id,
+            "product_id": product_id,
             "vendor": device.get("ID_VENDOR_FROM_DATABASE", device.get("ID_VENDOR", "")),
             "model": device.get("ID_MODEL_FROM_DATABASE", device.get("ID_MODEL", "")),
-            "serial": device.get("ID_SERIAL_SHORT", ""),
+            "manufacturer": device.get("ID_VENDOR", ""),
+            "product": device.get("ID_MODEL", ""),
+            "serial": serial_short,
+            "serial_full": serial_full,
+            "uid": uid,
+            "path_tag": path_tag,
+            "revision": device.get("ID_REVISION", ""),
+            "id_bus": device.get("ID_BUS", ""),
             "bus_num": device.get("BUSNUM", ""),
             "dev_num": device.get("DEVNUM", ""),
             "driver": device.get("DRIVER", ""),
             "usb_interfaces_raw": device.get("ID_USB_INTERFACES", ""),
             "device_class": device.get("bDeviceClass", ""),
-            "usb_type": self._classify_usb_type(device.get("bDeviceClass", "")),
-            "usb_interfaces": self._parse_interface_classes(device.get("ID_USB_INTERFACES", "")),
+            "usb_type": usb_type,
+            "usb_interfaces": interfaces,
             "dev_name": device.get("DEVNAME", ""),
         }
 
@@ -230,24 +253,42 @@ class USBMonitor(BaseMonitor):
             except Exception:
                 return ""
 
+        vendor_id = _read("idVendor")
+        product_id = _read("idProduct")
+        serial = _read("serial")
+        uid = self._build_device_uid(
+            vendor_id=vendor_id,
+            product_id=product_id,
+            serial=serial,
+            path_hint=path,
+        )
+        interfaces = self._read_sysfs_interface_classes(path)
+        usb_type = self._resolve_usb_type(_read("bDeviceClass"), interfaces)
+
         return {
             "sys_path": path,
             "name": name,
-            "vendor_id": _read("idVendor"),
-            "product_id": _read("idProduct"),
+            "vendor_id": vendor_id,
+            "product_id": product_id,
             "manufacturer": _read("manufacturer"),
             "product": _read("product"),
-            "serial": _read("serial"),
+            "model": _read("product"),
+            "serial": serial,
+            "serial_full": serial,
+            "uid": uid,
             "bus_num": _read("busnum"),
             "dev_num": _read("devnum"),
             "device_class": _read("bDeviceClass"),
-            "usb_type": self._classify_usb_type(_read("bDeviceClass")),
-            "usb_interfaces": self._read_sysfs_interface_classes(path),
+            "usb_type": usb_type,
+            "usb_interfaces": interfaces,
             "dev_name": "",
         }
 
     # ──────────────────────── Event handlers ────────────────────────────
     def _on_device_added(self, info: dict):
+        if self._should_suppress_event("USB_DEVICE_ATTACHED", info):
+            return
+
         vid_pid = f"{info.get('vendor_id', '')}:{info.get('product_id', '')}"
         is_whitelisted = vid_pid in self._whitelist
         usb_type = info.get("usb_type") or "unknown"
@@ -260,22 +301,29 @@ class USBMonitor(BaseMonitor):
         info["severity_engine"] = engine
 
         logger.info(
-            "USB ATTACHED: %s [%s] type=%s serial=%s whitelisted=%s",
+            "USB ATTACHED: %s [%s] uid=%s type=%s serial=%s bus=%s dev=%s whitelisted=%s",
             info.get("model") or info.get("product", "unknown"),
             vid_pid,
+            info.get("uid", ""),
             usb_type,
             info.get("serial", "N/A"),
+            info.get("bus_num", ""),
+            info.get("dev_num", ""),
             is_whitelisted,
         )
 
         if self._mon_cfg.get("alert_on_new_device"):
             label = "known" if is_whitelisted else "unknown"
+            vendor = info.get("vendor") or info.get("manufacturer") or "unknown"
+            bus = str(info.get("bus_num", "")).zfill(3) if str(info.get("bus_num", "")).strip() else "?"
+            dev = str(info.get("dev_num", "")).zfill(3) if str(info.get("dev_num", "")).strip() else "?"
             self._alert.fire(
                 monitor="usb",
                 event_type="USB_DEVICE_ATTACHED",
                 message=(
                     f"{label.title()} USB device attached: {vid_pid} "
-                    f"({info.get('model') or info.get('product', 'unknown')}, type={usb_type})"
+                    f"({vendor} {info.get('model') or info.get('product', 'unknown')}, "
+                    f"bus={bus},dev={dev}, uid={info.get('uid', '')}, type={usb_type})"
                 ),
                 severity=attach_severity,
                 details=info,
@@ -607,9 +655,32 @@ class USBMonitor(BaseMonitor):
         code = code.zfill(2)
         return _USB_CLASS_TO_TYPE.get(code, "unknown")
 
+    @classmethod
+    def _resolve_usb_type(cls, device_class: str, interfaces: list[str]) -> str:
+        usb_type = cls._classify_usb_type(device_class)
+        if usb_type != "unknown":
+            return usb_type
+
+        interfaces_u = {str(x).strip().upper() for x in interfaces}
+        if "MASS_STORAGE" in interfaces_u:
+            return "mass_storage"
+        if "HID" in interfaces_u:
+            return "hid"
+        return "unknown"
+
     def _on_device_removed(self, info: dict):
+        if self._should_suppress_event("USB_DEVICE_REMOVED", info):
+            return
+
         vid_pid = f"{info.get('vendor_id', '')}:{info.get('product_id', '')}"
-        logger.info("USB REMOVED: %s [%s]", info.get("model", "unknown"), vid_pid)
+        logger.info(
+            "USB REMOVED: %s [%s] uid=%s bus=%s dev=%s",
+            info.get("model", "unknown"),
+            vid_pid,
+            info.get("uid", ""),
+            info.get("bus_num", ""),
+            info.get("dev_num", ""),
+        )
         self._record_device_action(self._device_key(info), "remove")
         self._pending_mount_context.pop(info.get("sys_path", ""), None)
 
@@ -620,6 +691,47 @@ class USBMonitor(BaseMonitor):
             severity=SEVERITY_INFO,
             details=info,
         )
+
+    @staticmethod
+    def _build_device_uid(
+        vendor_id: str,
+        product_id: str,
+        serial: str,
+        path_hint: str,
+    ) -> str:
+        serial_or_path = str(serial or "").strip() or str(path_hint or "").strip()
+        return f"{vendor_id}:{product_id}:{serial_or_path}"
+
+    def _event_fingerprint(self, event_type: str, info: dict[str, Any]) -> str:
+        uid = str(info.get("uid", "")).strip()
+        if uid:
+            return f"{event_type}|{uid}"
+
+        return "|".join(
+            [
+                event_type,
+                str(info.get("vendor_id", "")),
+                str(info.get("product_id", "")),
+                str(info.get("serial", "")),
+                str(info.get("sys_path", "")),
+            ]
+        )
+
+    def _should_suppress_event(self, event_type: str, info: dict[str, Any]) -> bool:
+        if self._event_dedup_window_sec <= 0:
+            return False
+
+        now = time.time()
+        fp = self._event_fingerprint(event_type, info)
+        last = self._recent_event_emissions.get(fp)
+        self._recent_event_emissions[fp] = now
+
+        cutoff = now - max(self._event_dedup_window_sec * 4.0, 10.0)
+        self._recent_event_emissions = {
+            key: ts for key, ts in self._recent_event_emissions.items() if ts >= cutoff
+        }
+
+        return last is not None and (now - last) <= self._event_dedup_window_sec
 
     def _enrich_usb_context(self, info: dict):
         dev_candidates = self._candidate_device_nodes(info)

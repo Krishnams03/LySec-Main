@@ -21,6 +21,12 @@ from pathlib import Path
 from typing import Any
 import math
 
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+
 from lysec.fuzzy_hash import compare_fuzzy_hashes, compute_fuzzy_hashes_from_text
 
 try:
@@ -170,7 +176,18 @@ class AlertEngine:
         )
         # Simple dedup: hash(monitor+event_type+key_detail) -> last_ts
         self._seen: dict[str, float] = {}
-        self._dedup_window = 60  # seconds
+        self._dedup_window = float(self._config.get("dedup_window_sec", 60))
+        self._usb_dedup_window = float(self._config.get("usb_dedup_window_sec", 2.0))
+        self._dedup_state_file = self._config.get(
+            "dedup_state_file", "/var/run/lysec/alert-dedup-state.json"
+        )
+        self._dedup_state_ttl_sec = float(
+            self._config.get("dedup_state_ttl_sec", max(120.0, self._dedup_window * 4.0))
+        )
+        try:
+            Path(os.path.dirname(self._dedup_state_file)).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
         # Cross-monitor correlation settings
         corr_cfg = self._config.get("correlation", {})
@@ -298,11 +315,16 @@ class AlertEngine:
             self._apply_mitre_enrichment(alert)
 
         # Deduplication
-        dedup_key = f"{monitor}:{event_type}:{json.dumps(details, sort_keys=True, default=str)}"
+        dedup_key = self._build_dedup_key(alert)
+        dedup_window = self._dedup_window_for_alert(alert)
+        now = time.time()
         last = self._seen.get(dedup_key, 0)
-        if time.time() - last < self._dedup_window:
+        if now - last < dedup_window:
             return  # suppress duplicate
-        self._seen[dedup_key] = time.time()
+        if self._check_and_mark_global_dedup(dedup_key, now, dedup_window):
+            self._seen[dedup_key] = now
+            return
+        self._seen[dedup_key] = now
 
         # ── Dispatch ──
         self._dispatch(alert)
@@ -314,6 +336,84 @@ class AlertEngine:
         # ── Live anomaly (hybrid ML-style ranking) ──
         if self._ml_enabled and event_type not in ("CORRELATED_INCIDENT", "ML_ANOMALY_INCIDENT"):
             self._maybe_emit_live_anomaly(alert)
+
+    def _dedup_window_for_alert(self, alert: dict[str, Any]) -> float:
+        event_type = str(alert.get("event_type", "")).upper()
+        monitor = str(alert.get("monitor", "")).lower()
+        if monitor == "usb" or event_type.startswith("USB_"):
+            return self._usb_dedup_window
+        return self._dedup_window
+
+    def _build_dedup_key(self, alert: dict[str, Any]) -> str:
+        monitor = str(alert.get("monitor", ""))
+        event_type = str(alert.get("event_type", ""))
+        details = alert.get("details") or {}
+        if not isinstance(details, dict):
+            details = {"raw": str(details)}
+
+        if monitor.lower() == "usb" or event_type.upper().startswith("USB_"):
+            serial = (
+                str(details.get("serial", "")).strip()
+                or str(details.get("serial_full", "")).strip()
+            )
+            usb_identity = {
+                "uid": str(details.get("uid", "")).strip(),
+                "vendor_id": str(details.get("vendor_id", "")).strip(),
+                "product_id": str(details.get("product_id", "")).strip(),
+                "serial": serial,
+                "sys_path": str(details.get("sys_path", "")).strip(),
+                "path_tag": str(details.get("path_tag", "")).strip(),
+                "dev_name": str(details.get("dev_name", "")).strip(),
+                "mount_point": str(details.get("mount_point", "")).strip(),
+            }
+            return f"{monitor}:{event_type}:{json.dumps(usb_identity, sort_keys=True, default=str)}"
+
+        return f"{monitor}:{event_type}:{json.dumps(details, sort_keys=True, default=str)}"
+
+    def _check_and_mark_global_dedup(self, dedup_key: str, now: float, dedup_window: float) -> bool:
+        """Best-effort cross-process dedup using a shared JSON state file with flock."""
+        if not HAS_FCNTL or not self._dedup_state_file:
+            return False
+
+        state: dict[str, float] = {}
+        duplicate = False
+        ttl = max(float(dedup_window) * 4.0, float(self._dedup_state_ttl_sec))
+        cutoff = now - ttl
+
+        try:
+            with open(self._dedup_state_file, "a+", encoding="utf-8") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                fh.seek(0)
+                raw = fh.read().strip()
+                if raw:
+                    try:
+                        loaded = json.loads(raw)
+                        if isinstance(loaded, dict):
+                            state = {
+                                str(k): float(v)
+                                for k, v in loaded.items()
+                                if isinstance(v, (int, float))
+                            }
+                    except Exception:
+                        state = {}
+
+                state = {k: ts for k, ts in state.items() if ts >= cutoff}
+                prev = state.get(dedup_key, 0.0)
+                if (now - prev) < dedup_window:
+                    duplicate = True
+                else:
+                    state[dedup_key] = now
+
+                fh.seek(0)
+                fh.truncate(0)
+                fh.write(json.dumps(state, sort_keys=True))
+                fh.flush()
+                os.fsync(fh.fileno())
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            return False
+
+        return duplicate
 
     def _apply_alert_fuzzy_fingerprint(self, alert: dict[str, Any]):
         if not self._fuzzy_alert_enabled:

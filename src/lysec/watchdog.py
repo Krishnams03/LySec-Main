@@ -36,6 +36,11 @@ class WatchdogDaemon:
         self._heartbeat_timeout_sec = float(wd_cfg.get("heartbeat_timeout_sec", 8))
         self._restart_cooldown_sec = float(wd_cfg.get("restart_cooldown_sec", 20))
         self._service_name = wd_cfg.get("service_name", "lysec.service")
+        self._service_fallbacks = [
+            str(x).strip()
+            for x in wd_cfg.get("service_fallbacks", [])
+            if str(x).strip()
+        ]
 
         self._last_heartbeat = 0.0
         self._last_restart = 0.0
@@ -174,8 +179,10 @@ class WatchdogDaemon:
         return False
 
     def _candidate_services(self) -> list[str]:
+        # By default watchdog should only restart the explicitly configured service.
+        # Additional fallbacks are opt-in via daemon.watchdog.service_fallbacks.
         candidates = [str(self._service_name).strip() or "lysec.service"]
-        for alt in ("lysec-prelogin.service", "lysec.service"):
+        for alt in self._service_fallbacks:
             if alt not in candidates:
                 candidates.append(alt)
         return candidates

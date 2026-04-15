@@ -158,14 +158,27 @@ install_systemd() {
     systemctl daemon-reload
 
     BOOT_PROFILE="${LYSEC_BOOT_PROFILE:-prelogin}"
+    WATCHDOG_TARGET_SERVICE="lysec.service"
     if [[ "$BOOT_PROFILE" == "prelogin" ]]; then
+        systemctl stop lysec.service >/dev/null 2>&1 || true
         systemctl disable lysec.service >/dev/null 2>&1 || true
         systemctl enable lysec-prelogin.service
+        WATCHDOG_TARGET_SERVICE="lysec-prelogin.service"
         info "Boot profile: prelogin (enabled lysec-prelogin.service)"
     else
+        systemctl stop lysec-prelogin.service >/dev/null 2>&1 || true
         systemctl disable lysec-prelogin.service >/dev/null 2>&1 || true
         systemctl enable lysec.service
+        WATCHDOG_TARGET_SERVICE="lysec.service"
         info "Boot profile: standard (enabled lysec.service)"
+    fi
+
+    if [[ -f "$CONFIG_DIR/lysec.yaml" ]]; then
+        # Keep watchdog aligned to the selected primary service profile.
+        sed -i -E "s|^([[:space:]]*service_name:[[:space:]]*).*$|\\1${WATCHDOG_TARGET_SERVICE}|" "$CONFIG_DIR/lysec.yaml" || true
+        if ! grep -qE '^[[:space:]]*service_fallbacks:' "$CONFIG_DIR/lysec.yaml"; then
+            sed -i -E '/^[[:space:]]*service_name:/a\    service_fallbacks: []' "$CONFIG_DIR/lysec.yaml" || true
+        fi
     fi
 
     systemctl enable lysec-watchdog.service

@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 from unittest.mock import patch
 
 from lysec.alert_engine import AlertEngine
@@ -79,6 +80,89 @@ class AlertEngineFuzzyTests(unittest.TestCase):
             second_alert["details"]["alert_fuzzy"].get("similarity_prev"),
             {"ssdeep_score": 85},
         )
+
+    @patch.object(AlertEngine, "_dispatch")
+    def test_usb_dedup_uses_stable_identity_key(self, mock_dispatch):
+        eng = self._engine(
+            {
+                "alerts": {
+                    "dedup_window_sec": 60,
+                    "usb_dedup_window_sec": 2.0,
+                }
+            }
+        )
+
+        base = {
+            "uid": "8564:1000:ABC123",
+            "vendor_id": "8564",
+            "product_id": "1000",
+            "serial": "ABC123",
+            "sys_path": "/sys/bus/usb/devices/1-3",
+            "model": "JetFlash",
+            "dev_num": "2",
+        }
+        changed_non_identity = dict(base)
+        changed_non_identity["dev_num"] = "3"
+        changed_non_identity["active_users"] = ["alice"]
+
+        eng.fire(
+            monitor="usb",
+            event_type="USB_DEVICE_ATTACHED",
+            message="Unknown USB device attached",
+            severity="MEDIUM",
+            details=base,
+        )
+        eng.fire(
+            monitor="usb",
+            event_type="USB_DEVICE_ATTACHED",
+            message="Unknown USB device attached",
+            severity="MEDIUM",
+            details=changed_non_identity,
+        )
+
+        self.assertEqual(mock_dispatch.call_count, 1)
+
+    @patch.object(AlertEngine, "_dispatch")
+    def test_usb_dedup_shared_state_across_instances(self, mock_dispatch):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_fp = f"{tmp}/dedup.json"
+            eng = self._engine(
+                {
+                    "alerts": {
+                        "usb_dedup_window_sec": 5.0,
+                        "dedup_state_file": state_fp,
+                    }
+                }
+            )
+
+            payload = {
+                "uid": "8564:1000:ABC123",
+                "vendor_id": "8564",
+                "product_id": "1000",
+                "serial": "ABC123",
+                "sys_path": "/sys/bus/usb/devices/1-3",
+            }
+
+            eng.fire(
+                monitor="usb",
+                event_type="USB_DEVICE_ATTACHED",
+                message="Unknown USB device attached",
+                severity="MEDIUM",
+                details=payload,
+            )
+
+            # Simulate another process by clearing in-memory cache while reusing shared dedup state file.
+            eng._seen = {}
+
+            eng.fire(
+                monitor="usb",
+                event_type="USB_DEVICE_ATTACHED",
+                message="Unknown USB device attached",
+                severity="MEDIUM",
+                details=payload,
+            )
+
+            self.assertEqual(mock_dispatch.call_count, 1)
 
 
 if __name__ == "__main__":

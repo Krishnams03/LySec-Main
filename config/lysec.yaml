@@ -20,7 +20,8 @@ daemon:
     heartbeat_interval_sec: 2
     heartbeat_timeout_sec: 8
     restart_cooldown_sec: 20
-    service_name: lysec.service
+    service_name: lysec-prelogin.service
+    service_fallbacks: []
 
 logging:
   log_dir: /var/log/lysec
@@ -35,6 +36,7 @@ monitors:
   usb:
     enabled: true
     poll_interval: 1
+    event_dedup_window_sec: 2.0
     alert_on_new_device: true
     emit_startup_inventory: true
     startup_inventory_severity: INFO
