@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
             "heartbeat_interval_sec": 2,
             "heartbeat_timeout_sec": 8,
             "restart_cooldown_sec": 20,
-            "service_name": "lysec.service",
+            "service_name": "lysec-prelogin.service",
             "service_fallbacks": [],
         },
     },

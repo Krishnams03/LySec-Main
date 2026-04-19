@@ -52,7 +52,8 @@ else
 fi
 
 step "Trigger filesystem sequence for fuzzy hashing"
-DEMO_DIR="/tmp/lysec_fuzzy_demo"
+# Using /media instead of /tmp since /tmp is no longer monitored in your config
+DEMO_DIR="/media/lysec_fuzzy_demo"
 DEMO_FILE="$DEMO_DIR/sample.txt"
 mkdir -p "$DEMO_DIR"
 echo "alpha alpha alpha" > "$DEMO_FILE"
@@ -82,6 +83,22 @@ else
   warn "no suspicious demo binary found (nmap/nc/ncat/tcpdump)"
 fi
 
+step "Trigger remote/network activity"
+if command -v ip >/dev/null 2>&1; then
+  (sudo ip link set dev lo promisc on && sleep 1 && sudo ip link set dev lo promisc off || true)
+  pass "ran network promiscuous mode trigger"
+else
+  warn "could not trigger network promiscuous mode (missing ip command)"
+fi
+
+step "Trigger failed login activity"
+if command -v su >/dev/null 2>&1; then
+  echo "wrongpassword" | su - fakeuser -c "echo hack" >/dev/null 2>&1 || true
+  pass "ran failed login trigger"
+else
+  warn "could not trigger failed login"
+fi
+
 step "USB scenario tests (manual)"
 readiness_prompt "USB disk: plug in mass-storage device, wait 5s, then unplug"
 readiness_prompt "USB keyboard/HID: plug in keyboard (or HID), wait 5s, then unplug"
@@ -91,8 +108,11 @@ pass "manual USB scenarios completed"
 step "Watchdog recovery test"
 echo "[action] stopping lysec once; watchdog should restart it"
 sudo systemctl stop lysec
-sleep 12
-if sudo systemctl is-active lysec >/dev/null; then
+# The watchdog has an 8-second timeout + 20-second cooldown before it restarts the monitored service
+sleep 32
+if sudo systemctl is-active lysec-prelogin >/dev/null; then
+  pass "lysec-prelogin restarted by watchdog"
+elif sudo systemctl is-active lysec >/dev/null; then
   pass "lysec restarted by watchdog"
 else
   warn "watchdog did not restart lysec within expected time"
@@ -190,9 +210,11 @@ PY
 
 step "Useful follow-up commands"
 echo "sudo lysec alerts --last 30m"
-echo "sudo lysec timeline --monitor usb --start 2026-03-24T00:00:00 --end 2026-03-24T23:59:59"
-echo "sudo lysec timeline --monitor process --start 2026-03-24T00:00:00 --end 2026-03-24T23:59:59"
-echo "sudo lysec timeline --monitor filesystem --start 2026-03-24T00:00:00 --end 2026-03-24T23:59:59"
+echo "sudo lysec timeline --monitor usb"
+echo "sudo lysec timeline --monitor process"
+echo "sudo lysec timeline --monitor filesystem"
+echo "sudo lysec timeline --monitor network"
+echo "sudo lysec timeline --monitor login"
 echo "sudo cat $VERIFY_LOG"
 
 echo

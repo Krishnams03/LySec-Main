@@ -1,41 +1,24 @@
-[Unit]
-Description=LySec - Linux Forensics Monitoring Daemon (Hardened)
-Documentation=https://github.com/yourname/lysec
-After=local-fs.target systemd-udevd.service
-Wants=systemd-udevd.service
-StartLimitIntervalSec=120
-StartLimitBurst=10
+cat << 'EOF' > ~/fake_exploit.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/lysecd start --foreground
-ExecStop=/usr/local/bin/lysecd stop
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
-RestartSec=3
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=lysec
+int main() {
+    // This system call will force the kernel to drop root privileges 
+    // down to our shell, which is exactly what LySec searches for!
+    setuid(0); 
+    printf("I am running as Effective UID: %d\n", geteuid());
+    system("/bin/sh");
+    return 0;
+}
+EOF
 
-# Security controls
-NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectControlGroups=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
-ProtectKernelLogs=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/var/log/lysec /var/lib/lysec /var/run/lysec
-LockPersonality=yes
-MemoryDenyWriteExecute=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-SystemCallArchitectures=native
+# Compile it into a true binary in your home folder
+gcc ~/fake_exploit.c -o ~/fake_exploit
 
-# Keep service manageable by administrators. For stricter posture,
-# consider adding RefuseManualStop=yes after validating operations.
+# Give it the SUID bit
+sudo chown root:root ~/fake_exploit
+sudo chmod 4755 ~/fake_exploit
 
-[Install]
-WantedBy=multi-user.target
+# Execute it as your regular 'cypher' user (no sudo)
+~/fake_exploit

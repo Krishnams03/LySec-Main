@@ -300,30 +300,31 @@ class USBMonitor(BaseMonitor):
         attach_severity, engine = self._score_usb_attach_severity(info, is_whitelisted)
         info["severity_engine"] = engine
 
+        bus_str = str(info.get("bus_num", "")).zfill(3) if str(info.get("bus_num", "")).strip() else "???"
+        dev_str = str(info.get("dev_num", "")).zfill(3) if str(info.get("dev_num", "")).strip() else "???"
+        vid = info.get("vendor_id", "0000")
+        pid = info.get("product_id", "0000")
+        vendor = info.get("vendor") or info.get("manufacturer") or "Unknown"
+        product = info.get("model") or info.get("product") or "Device"
+        lsusb_fmt = f"Bus {bus_str} Device {dev_str}: ID {vid}:{pid} {vendor} {product}"
+
         logger.info(
-            "USB ATTACHED: %s [%s] uid=%s type=%s serial=%s bus=%s dev=%s whitelisted=%s",
-            info.get("model") or info.get("product", "unknown"),
-            vid_pid,
+            "USB ATTACHED: %s | internal_uid=%s type=%s serial=%s whitelisted=%s",
+            lsusb_fmt,
             info.get("uid", ""),
             usb_type,
             info.get("serial", "N/A"),
-            info.get("bus_num", ""),
-            info.get("dev_num", ""),
             is_whitelisted,
         )
 
         if self._mon_cfg.get("alert_on_new_device"):
             label = "known" if is_whitelisted else "unknown"
-            vendor = info.get("vendor") or info.get("manufacturer") or "unknown"
-            bus = str(info.get("bus_num", "")).zfill(3) if str(info.get("bus_num", "")).strip() else "?"
-            dev = str(info.get("dev_num", "")).zfill(3) if str(info.get("dev_num", "")).strip() else "?"
             self._alert.fire(
                 monitor="usb",
                 event_type="USB_DEVICE_ATTACHED",
                 message=(
-                    f"{label.title()} USB device attached: {vid_pid} "
-                    f"({vendor} {info.get('model') or info.get('product', 'unknown')}, "
-                    f"bus={bus},dev={dev}, uid={info.get('uid', '')}, type={usb_type})"
+                    f"{label.title()} USB device attached: {lsusb_fmt} "
+                    f"(uid={info.get('uid', '')}, type={usb_type})"
                 ),
                 severity=attach_severity,
                 details=info,
@@ -944,14 +945,31 @@ class USBMonitor(BaseMonitor):
                 self._known_devices[device.sys_path] = info
                 self._prev_device_paths.add(device.sys_path)
                 self._seen_device_signatures.add(self._device_signature(info))
+                
+                bus_str = str(info.get("bus_num", "")).zfill(3) if str(info.get("bus_num", "")).strip() else "???"
+                dev_str = str(info.get("dev_num", "")).zfill(3) if str(info.get("dev_num", "")).strip() else "???"
+                vid = info.get("vendor_id", "0000")
+                pid = info.get("product_id", "0000")
+                vendor = info.get("vendor") or info.get("manufacturer") or "Unknown"
+                product = info.get("model") or info.get("product") or "Device"
+                lsusb_fmt = f"Bus {bus_str} Device {dev_str}: ID {vid}:{pid} {vendor} {product}"
+                
+                logger.info(
+                    "USB PRESENT: %s | internal_uid=%s type=%s serial=%s whitelisted=%s",
+                    lsusb_fmt,
+                    info.get("uid", ""),
+                    info.get("usb_type", "unknown"),
+                    info.get("serial", "N/A"),
+                    is_whitelisted,
+                )
+
                 if self._emit_startup_inventory:
                     self._alert.fire(
                         monitor="usb",
                         event_type="USB_DEVICE_PRESENT_AT_START",
                         message=(
-                            "USB device already present at daemon start: "
-                            f"{vid_pid} ({info.get('model') or info.get('product', 'unknown')}, "
-                            f"type={info.get('usb_type', 'unknown')})"
+                            f"USB device already present at startup: {lsusb_fmt} "
+                            f"(type={info.get('usb_type', 'unknown')})"
                         ),
                         severity=self._max_severity(self._startup_inventory_severity, severity),
                         details=info,

@@ -539,13 +539,13 @@ class ProcessMonitor(BaseMonitor):
                 if not pid:
                     continue
 
-                if pid in current and pid not in self._known_procs and what in {"exec", "fork"}:
+                if pid in current and pid not in self._known_procs and what == "exec":
                     self._on_new_process(current[pid])
                     handled.add(pid)
                     continue
 
                 # Short-lived process likely exited before polling snapshot.
-                if self._alert_on_shortlived_exec and what in {"exec", "fork"} and pid not in current:
+                if self._alert_on_shortlived_exec and what == "exec" and pid not in current:
                     self._alert.fire(
                         monitor="process",
                         event_type="PROCESS_SHORTLIVED_EVENT",

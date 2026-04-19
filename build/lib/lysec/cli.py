@@ -582,6 +582,8 @@ def _get_running_pid(pid_file: str):
             pid = int(f.read().strip())
         os.kill(pid, 0)
         return pid
+    except PermissionError:
+        return pid
     except (ValueError, OSError):
         return None
 

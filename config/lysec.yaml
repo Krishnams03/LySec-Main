@@ -133,6 +133,7 @@ monitors:
     alert_on_shortlived_exec: true
     alert_on_new_process: true
     alert_on_privilege_escalation: true
+    alert_on_shortlived_exec: false
     alert_on_deleted_exe: true
     alert_on_masquerade: true
     alert_on_suspicious_tree: true
